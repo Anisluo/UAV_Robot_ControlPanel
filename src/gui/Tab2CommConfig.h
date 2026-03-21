@@ -1,0 +1,48 @@
+#ifndef TAB2COMMCONFIG_H
+#define TAB2COMMCONFIG_H
+
+#include <QWidget>
+
+class RpcClient;
+class QLineEdit;
+class QComboBox;
+class QSpinBox;
+
+class Tab2CommConfig : public QWidget {
+    Q_OBJECT
+public:
+    explicit Tab2CommConfig(RpcClient *rpc, QWidget *parent = nullptr);
+
+    // Called by MainWindow when connection params change
+    void setConnectionParams(const QString &host, quint16 rpcPort, quint16 videoPort);
+
+private slots:
+    void onApplyCan();
+    void onApplySerial();
+    void onApplyRelay();
+    void onApplyEthernet();
+
+private:
+    void buildUi();
+
+    RpcClient  *rpc_;
+
+    // CAN
+    QComboBox  *can_device_combo_;
+    QSpinBox   *can_bitrate_spin_;
+
+    // Serial
+    QLineEdit  *serial_device_edit_;
+    QComboBox  *serial_baud_combo_;
+
+    // Relay
+    QSpinBox   *relay_gpio_spin_;
+    QComboBox  *relay_active_combo_;
+
+    // Ethernet
+    QLineEdit  *eth_host_edit_;
+    QSpinBox   *eth_rpc_port_spin_;
+    QSpinBox   *eth_video_port_spin_;
+};
+
+#endif // TAB2COMMCONFIG_H
