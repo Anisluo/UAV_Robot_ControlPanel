@@ -9,6 +9,8 @@
 #include "DroneWidget.h"
 #include "Tab2CommConfig.h"
 #include "Tab3Help.h"
+#include "Tab4TaskConfig.h"
+#include "NpuWidget.h"
 #include "core/RpcClient.h"
 #include "core/VideoClient.h"
 #include "core/Protocol.h"
@@ -67,11 +69,15 @@ void MainWindow::buildUi()
     QWidget *dashTab = buildDashboardTab();
     tab_widget_->addTab(dashTab, "主控面板");
 
-    // Tab 2: Interfaces
+    // Tab 2: Task Configuration (between dashboard and comm config)
+    tab4_ = new Tab4TaskConfig(rpc_client_, this);
+    tab_widget_->addTab(tab4_, "任务配置");
+
+    // Tab 3: Interfaces
     tab2_ = new Tab2CommConfig(rpc_client_, this);
     tab_widget_->addTab(tab2_, "接口配置");
 
-    // Tab 3: Help
+    // Tab 4: Help
     tab3_ = new Tab3Help(this);
     tab_widget_->addTab(tab3_, "帮助");
 
@@ -133,6 +139,7 @@ QWidget* MainWindow::buildDashboardTab()
     rightLayout->addWidget(buildConnectionGroup());
 
     // Sub-system widgets
+    npu_widget_     = new NpuWidget(rpc_client_, rightContainer);
     arm_widget_     = new ArmWidget(rpc_client_, rightContainer);
     ugv_widget_     = new UGVWidget(rpc_client_, rightContainer);
     airport_widget_ = new AirportWidget(rpc_client_, rightContainer);
@@ -140,6 +147,7 @@ QWidget* MainWindow::buildDashboardTab()
     mesh_widget_    = new MeshMapWidget(rightContainer);
     drone_widget_   = new DroneWidget(rightContainer);
 
+    rightLayout->addWidget(npu_widget_);
     rightLayout->addWidget(arm_widget_);
     rightLayout->addWidget(ugv_widget_);
     rightLayout->addWidget(airport_widget_);
@@ -228,8 +236,9 @@ void MainWindow::onConnect()
     rpc_client_->connectToHost();
     video_client_->connectToHost();
 
-    // Mirror to Tab2
+    // Mirror to Tab2 / Tab4
     tab2_->setConnectionParams(host, rpcPort, vidPort);
+    tab4_->setConnectionParams(host, rpcPort, vidPort);
 
     btn_connect_->setEnabled(false);
     setLedColor("#ff9800");

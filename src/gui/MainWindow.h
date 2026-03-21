@@ -16,6 +16,8 @@ class MeshMapWidget;
 class DroneWidget;
 class Tab2CommConfig;
 class Tab3Help;
+class Tab4TaskConfig;
+class NpuWidget;
 
 class QTabWidget;
 class QLabel;
@@ -61,8 +63,10 @@ private:
     MeshMapWidget *mesh_widget_;
     DroneWidget   *drone_widget_;
 
-    Tab2CommConfig *tab2_;
-    Tab3Help       *tab3_;
+    Tab2CommConfig  *tab2_;
+    Tab3Help        *tab3_;
+    Tab4TaskConfig  *tab4_;
+    NpuWidget       *npu_widget_;
 
     // Connection controls
     QLineEdit    *host_edit_;

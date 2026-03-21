@@ -29,6 +29,18 @@ namespace Methods {
     constexpr const char* CONFIG_SET_SERIAL  = "config.set_serial";
     constexpr const char* CONFIG_SET_RELAY   = "config.set_relay";
     constexpr const char* CONFIG_SET_ETHERNET= "config.set_ethernet";
+    // NPU / recognition
+    constexpr const char* NPU_START          = "npu.start";
+    constexpr const char* NPU_STOP           = "npu.stop";
+    constexpr const char* NPU_SET_STRATEGY   = "npu.set_strategy";
+    constexpr const char* NPU_SET_THRESHOLD  = "npu.set_threshold";
+    constexpr const char* NPU_GET_DETECTIONS = "npu.get_detections";
+    constexpr const char* NPU_GET_STATUS     = "npu.get_status";
+    // Task control
+    constexpr const char* TASK_START         = "task.start";
+    constexpr const char* TASK_STOP          = "task.stop";
+    constexpr const char* TASK_RESET         = "task.reset";
+    constexpr const char* TASK_GET_STATUS    = "task.get_status";
 }
 
 // JSON field name constants
@@ -67,6 +79,25 @@ namespace Fields {
     constexpr const char* FPS         = "fps";
     constexpr const char* EXPOSURE_US = "exposure_us";
 
+    // npu / detection
+    constexpr const char* STRATEGY_ID  = "strategy_id";
+    constexpr const char* THRESHOLD    = "threshold";
+    constexpr const char* FRAME_ID     = "frame_id";
+    constexpr const char* NUM_DETS     = "num_detections";
+    constexpr const char* DETECTIONS   = "detections";
+    constexpr const char* CLASS_ID     = "class_id";
+    constexpr const char* SCORE        = "score";
+    constexpr const char* X1           = "x1";
+    constexpr const char* Y1           = "y1";
+    constexpr const char* X2           = "x2";
+    constexpr const char* Y2           = "y2";
+    constexpr const char* X_MM         = "x_mm";
+    constexpr const char* Y_MM         = "y_mm";
+    constexpr const char* Z_MM         = "z_mm";
+    constexpr const char* HAS_XYZ      = "has_xyz";
+    // task
+    constexpr const char* TASK_NAME    = "task";
+    constexpr const char* TASK_STATE   = "task_state";
     // config
     constexpr const char* DEVICE      = "device";
     constexpr const char* BITRATE     = "bitrate";
