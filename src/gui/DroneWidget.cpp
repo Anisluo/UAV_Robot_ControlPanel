@@ -1,6 +1,8 @@
 #include "DroneWidget.h"
 #include "MeshMapWidget.h"
 
+#include <QFile>
+#include <QFileDialog>
 #include <QFrame>
 #include <QGridLayout>
 #include <QHBoxLayout>
@@ -10,6 +12,8 @@
 #include <QLineEdit>
 #include <QHostAddress>
 #include <QPushButton>
+#include <QSpinBox>
+#include <QTcpSocket>
 #include <QTime>
 #include <QTimer>
 #include <QUdpSocket>
@@ -31,6 +35,7 @@ DroneWidget::DroneWidget(QWidget *parent)
     : QGroupBox("大疆无人机控制", parent)
     , refresh_timer_(new QTimer(this))
     , udp_socket_(new QUdpSocket(this))
+    , kmz_socket_(new QTcpSocket(this))
 {
     buildUi();
 
@@ -40,6 +45,15 @@ DroneWidget::DroneWidget(QWidget *parent)
             this, &DroneWidget::refreshDroneStates);
     connect(udp_socket_, &QUdpSocket::readyRead,
             this, &DroneWidget::onUdpReadyRead);
+
+    connect(kmz_socket_, &QTcpSocket::connected,
+            this, &DroneWidget::onKmzConnected);
+    connect(kmz_socket_, &QTcpSocket::bytesWritten,
+            this, &DroneWidget::onKmzBytesWritten);
+    connect(kmz_socket_, &QTcpSocket::disconnected,
+            this, &DroneWidget::onKmzDisconnected);
+    connect(kmz_socket_, &QAbstractSocket::errorOccurred,
+            this, &DroneWidget::onKmzError);
 
     refresh_timer_->start(5000);
     refreshDroneStates();
@@ -96,6 +110,74 @@ void DroneWidget::buildUi()
     status_label_ = new QLabel("等待 activate 节点...", this);
     status_label_->setStyleSheet("font-family: Consolas; color: #888aaa;");
     layout->addWidget(status_label_);
+
+    // ── KMZ 路径规划下发 ──────────────────────────────────────────────────
+    auto *sep = new QFrame(this);
+    sep->setFrameShape(QFrame::HLine);
+    sep->setStyleSheet("color: #3a3f52;");
+    layout->addWidget(sep);
+
+    auto *kmzTitle = new QLabel("KMZ 路径规划下发", this);
+    kmzTitle->setStyleSheet("color: #00c8d7; font-family: Consolas; font-weight: 700;");
+    layout->addWidget(kmzTitle);
+
+    // File selector row
+    auto *kmzFileRow = new QHBoxLayout;
+    auto *kmzFileLabel = new QLabel("规划文件:", this);
+    kmzFileLabel->setStyleSheet("color: #00c8d7; font-family: Consolas;");
+    kmzFileLabel->setFixedWidth(64);
+
+    kmz_path_edit_ = new QLineEdit(this);
+    kmz_path_edit_->setPlaceholderText("未选择 KMZ 文件...");
+    kmz_path_edit_->setReadOnly(true);
+
+    btn_kmz_load_ = new QPushButton("选择文件", this);
+    btn_kmz_load_->setFixedWidth(80);
+    btn_kmz_load_->setFixedHeight(28);
+
+    kmzFileRow->addWidget(kmzFileLabel);
+    kmzFileRow->addWidget(kmz_path_edit_, 1);
+    kmzFileRow->addWidget(btn_kmz_load_);
+    layout->addLayout(kmzFileRow);
+
+    // Target IP + port row
+    auto *kmzTargetRow = new QHBoxLayout;
+    auto *kmzIpLabel = new QLabel("目标节点:", this);
+    kmzIpLabel->setStyleSheet("color: #00c8d7; font-family: Consolas;");
+    kmzIpLabel->setFixedWidth(64);
+
+    kmz_ip_edit_ = new QLineEdit("192.168.1.101", this);
+    kmz_ip_edit_->setFixedWidth(130);
+    kmz_ip_edit_->setPlaceholderText("IP 地址");
+
+    auto *kmzPortLabel = new QLabel("端口:", this);
+    kmzPortLabel->setStyleSheet("color: #00c8d7; font-family: Consolas;");
+
+    kmz_port_spin_ = new QSpinBox(this);
+    kmz_port_spin_->setRange(1, 65535);
+    kmz_port_spin_->setValue(14550);
+    kmz_port_spin_->setFixedWidth(75);
+
+    btn_kmz_send_ = new QPushButton("下 发", this);
+    btn_kmz_send_->setFixedWidth(80);
+    btn_kmz_send_->setFixedHeight(28);
+    btn_kmz_send_->setEnabled(false);
+
+    kmzTargetRow->addWidget(kmzIpLabel);
+    kmzTargetRow->addWidget(kmz_ip_edit_);
+    kmzTargetRow->addSpacing(8);
+    kmzTargetRow->addWidget(kmzPortLabel);
+    kmzTargetRow->addWidget(kmz_port_spin_);
+    kmzTargetRow->addStretch();
+    kmzTargetRow->addWidget(btn_kmz_send_);
+    layout->addLayout(kmzTargetRow);
+
+    kmz_status_label_ = new QLabel("就绪", this);
+    kmz_status_label_->setStyleSheet("font-family: Consolas; color: #888aaa;");
+    layout->addWidget(kmz_status_label_);
+
+    connect(btn_kmz_load_, &QPushButton::clicked, this, &DroneWidget::onKmzLoadFile);
+    connect(btn_kmz_send_, &QPushButton::clicked, this, &DroneWidget::onKmzSend);
 }
 
 void DroneWidget::createNodeCard(QGridLayout *grid, int row, int octet)
@@ -313,4 +395,85 @@ void DroneWidget::onUdpReadyRead()
             updateNodeTimestamp(req.octet, QTime::currentTime().toString("hh:mm:ss"));
         }
     }
+}
+
+// ─── KMZ 路径规划下发 ─────────────────────────────────────────────────────────
+
+void DroneWidget::onKmzLoadFile()
+{
+    const QString path = QFileDialog::getOpenFileName(
+        this, "选择 KMZ 路径规划文件", QString(),
+        "KMZ 文件 (*.kmz);;所有文件 (*)");
+    if (path.isEmpty()) return;
+
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly)) {
+        kmz_status_label_->setText("错误: 无法打开文件");
+        kmz_status_label_->setStyleSheet("font-family: Consolas; color: #f44336;");
+        return;
+    }
+    kmz_data_ = f.readAll();
+    f.close();
+
+    kmz_path_edit_->setText(path);
+    kmz_status_label_->setText(QString("已加载  %1 字节").arg(kmz_data_.size()));
+    kmz_status_label_->setStyleSheet("font-family: Consolas; color: #4caf50;");
+    btn_kmz_send_->setEnabled(!kmz_data_.isEmpty());
+}
+
+void DroneWidget::onKmzSend()
+{
+    if (kmz_data_.isEmpty()) {
+        kmz_status_label_->setText("错误: 请先选择 KMZ 文件");
+        kmz_status_label_->setStyleSheet("font-family: Consolas; color: #f44336;");
+        return;
+    }
+    if (kmz_socket_->state() != QAbstractSocket::UnconnectedState) {
+        kmz_socket_->abort();
+    }
+
+    const QString ip   = kmz_ip_edit_->text().trimmed();
+    const quint16 port = static_cast<quint16>(kmz_port_spin_->value());
+
+    kmz_bytes_written_ = 0;
+    btn_kmz_send_->setEnabled(false);
+    kmz_status_label_->setText(QString("正在连接 %1:%2 …").arg(ip).arg(port));
+    kmz_status_label_->setStyleSheet("font-family: Consolas; color: #ff9800;");
+    kmz_socket_->connectToHost(ip, port);
+}
+
+void DroneWidget::onKmzConnected()
+{
+    kmz_status_label_->setText(
+        QString("连接成功，正在发送 %1 字节…").arg(kmz_data_.size()));
+    kmz_status_label_->setStyleSheet("font-family: Consolas; color: #ff9800;");
+    kmz_socket_->write(kmz_data_);
+}
+
+void DroneWidget::onKmzBytesWritten(qint64 bytes)
+{
+    kmz_bytes_written_ += bytes;
+    if (kmz_bytes_written_ >= kmz_data_.size()) {
+        kmz_socket_->disconnectFromHost();
+    }
+}
+
+void DroneWidget::onKmzDisconnected()
+{
+    if (kmz_bytes_written_ >= kmz_data_.size() && !kmz_data_.isEmpty()) {
+        kmz_status_label_->setText(
+            QString("下发完成  %1 字节").arg(kmz_bytes_written_));
+        kmz_status_label_->setStyleSheet("font-family: Consolas; color: #4caf50;");
+    } else {
+        kmz_status_label_->setText("连接已断开");
+        kmz_status_label_->setStyleSheet("font-family: Consolas; color: #888aaa;");
+    }
+    btn_kmz_send_->setEnabled(!kmz_data_.isEmpty());
+}
+
+void DroneWidget::onKmzError(QAbstractSocket::SocketError)
+{
+    kmz_status_label_->setText("错误: " + kmz_socket_->errorString());
+    kmz_status_label_->setStyleSheet("font-family: Consolas; color: #f44336;");
+    btn_kmz_send_->setEnabled(!kmz_data_.isEmpty());
 }

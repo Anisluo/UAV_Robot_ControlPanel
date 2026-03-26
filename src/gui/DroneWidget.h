@@ -4,15 +4,18 @@
 #include <QGroupBox>
 #include <QByteArray>
 #include <QHash>
+#include <QAbstractSocket>
 
 #include "MeshMapWidget.h"
 
 class QLineEdit;
+class QSpinBox;
 class QLabel;
 class QPushButton;
 class QFrame;
 class QTimer;
 class QUdpSocket;
+class QTcpSocket;
 
 class DroneWidget : public QGroupBox {
     Q_OBJECT
@@ -26,6 +29,12 @@ public slots:
 private slots:
     void refreshDroneStates();
     void onUdpReadyRead();
+    void onKmzLoadFile();
+    void onKmzSend();
+    void onKmzConnected();
+    void onKmzBytesWritten(qint64 bytes);
+    void onKmzDisconnected();
+    void onKmzError(QAbstractSocket::SocketError err);
 
 private:
     struct PendingRequest {
@@ -59,6 +68,17 @@ private:
     QHash<int, QLabel*> heading_labels_;
     QHash<int, QLabel*> gps_labels_;
     QHash<int, QLabel*> updated_labels_;
+
+    // KMZ 路径规划下发
+    QLineEdit   *kmz_path_edit_;
+    QLineEdit   *kmz_ip_edit_;
+    QSpinBox    *kmz_port_spin_;
+    QPushButton *btn_kmz_load_;
+    QPushButton *btn_kmz_send_;
+    QLabel      *kmz_status_label_;
+    QTcpSocket  *kmz_socket_;
+    QByteArray   kmz_data_;
+    qint64       kmz_bytes_written_{0};
 };
 
 #endif // DRONEWIDGET_H
