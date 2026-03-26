@@ -4,9 +4,10 @@ MOC ?= $(shell pkg-config --variable=host_bins Qt5Core)/moc
 QT_CFLAGS := $(shell pkg-config --cflags Qt5Widgets Qt5Network)
 QT_LIBS   := $(shell pkg-config --libs   Qt5Widgets Qt5Network)
 
-CXXFLAGS := -std=c++17 -Wall -Wextra -O2 -fPIC \
+CXXFLAGS := -std=c++17 -Wall -Wextra -g -O2 -fPIC \
             -I src -I src/core -I src/gui \
-            $(QT_CFLAGS)
+            $(QT_CFLAGS) \
+            -MMD -MP
 
 BUILD_DIR := build
 OBJ_DIR   := $(BUILD_DIR)/obj
@@ -56,6 +57,10 @@ $(OBJ_DIR)/%.o: src/%.cpp
 # ── Install Qt5 dev packages (Ubuntu) ─────────────────────────────────────
 install-deps:
 	sudo apt-get update && sudo apt-get install -y qtbase5-dev pkg-config
+
+# ── Auto-generated header dependencies ────────────────────────────────────
+DEPS := $(OBJS:.o=.d)
+-include $(DEPS)
 
 # ── Clean ──────────────────────────────────────────────────────────────────
 clean:
