@@ -13,6 +13,7 @@
 #include "NpuWidget.h"
 #include "core/RpcClient.h"
 #include "core/VideoClient.h"
+#include "core/MeshPinger.h"
 #include "core/Protocol.h"
 
 #include <QTabWidget>
@@ -34,6 +35,7 @@ MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
     , rpc_client_(new RpcClient(this))
     , video_client_(new VideoClient(this))
+    , mesh_pinger_(new MeshPinger(this))
 {
     setWindowTitle("无人机机器人控制台");
     resize(1400, 900);
@@ -49,6 +51,14 @@ MainWindow::MainWindow(QWidget *parent)
     connect(video_client_, &VideoClient::frameReady,  camera_widget_, &CameraWidget::setFrame);
     connect(video_client_, &VideoClient::fpsUpdated,  camera_widget_, &CameraWidget::updateFps);
     connect(video_client_, &VideoClient::fpsUpdated,  this,           &MainWindow::onFpsUpdated);
+    connect(video_client_, &VideoClient::logMessage,  this,           &MainWindow::onLogMessage);
+
+    // Mesh topology: ping 192.168.1.101..106 every 5 s, update map widget
+    connect(mesh_pinger_, &MeshPinger::nodesUpdated,
+            mesh_widget_,  &MeshMapWidget::updateNodes);
+    connect(mesh_pinger_, &MeshPinger::nodesUpdated,
+            drone_widget_, &DroneWidget::updateMeshNodes);
+    mesh_pinger_->start(5000);
 
     // Initial state
     btn_disconnect_->setEnabled(false);
@@ -146,6 +156,7 @@ QWidget* MainWindow::buildDashboardTab()
     gripper_widget_ = new GripperWidget(rpc_client_, rightContainer);
     mesh_widget_    = new MeshMapWidget(rightContainer);
     drone_widget_   = new DroneWidget(rightContainer);
+    drone_widget_->setDefaultTargetHost("192.168.1.101");
 
     rightLayout->addWidget(npu_widget_);
     rightLayout->addWidget(arm_widget_);
@@ -176,7 +187,7 @@ QWidget* MainWindow::buildConnectionGroup()
     // Host row
     auto *hostRow = new QHBoxLayout;
     hostRow->addWidget(new QLabel("主机:", grp));
-    host_edit_ = new QLineEdit("192.168.10.2", grp);
+    host_edit_ = new QLineEdit("192.168.1.101", grp);
     hostRow->addWidget(host_edit_);
     layout->addLayout(hostRow);
 
@@ -232,9 +243,9 @@ void MainWindow::onConnect()
 
     rpc_client_->setHost(host, rpcPort);
     video_client_->setHost(host, vidPort);
+    drone_widget_->setDefaultTargetHost(host);
 
     rpc_client_->connectToHost();
-    video_client_->connectToHost();
 
     // Mirror to Tab2 / Tab4
     tab2_->setConnectionParams(host, rpcPort, vidPort);
@@ -258,12 +269,18 @@ void MainWindow::onRpcConnected()
     setLedColor("#4caf50");
     status_label_->setText("已连接: " + host_edit_->text());
 
-    // Send a ping to verify
-    rpc_client_->call(Protocol::Methods::SYSTEM_PING, QJsonObject{},
-        [this](QJsonObject result) {
-            Q_UNUSED(result)
-            onPingResult();
-        });
+    // Give the socket event loop one turn before the first RPC call so
+    // reconnects do not race with any pending disconnect/close handling.
+    QTimer::singleShot(50, this, [this]() {
+        if (!rpc_client_->isConnected()) {
+            return;
+        }
+        rpc_client_->call(Protocol::Methods::SYSTEM_PING, QJsonObject{},
+            [this](QJsonObject result) {
+                Q_UNUSED(result)
+                onPingResult();
+            });
+    });
 }
 
 void MainWindow::onRpcDisconnected()
@@ -288,6 +305,7 @@ void MainWindow::onLogMessage(const QString &msg)
 void MainWindow::onPingResult()
 {
     log_widget_->appendLog("INFO", "[系统] Ping 成功 - 机器人在线。");
+    video_client_->connectToHost();
 }
 
 void MainWindow::setLedColor(const QString &color)

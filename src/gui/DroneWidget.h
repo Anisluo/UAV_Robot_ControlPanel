@@ -3,42 +3,62 @@
 
 #include <QGroupBox>
 #include <QByteArray>
-#include <QAbstractSocket>
-#include <QTcpSocket>
+#include <QHash>
+
+#include "MeshMapWidget.h"
 
 class QLineEdit;
-class QSpinBox;
-class QPushButton;
 class QLabel;
-class QTcpSocket;
+class QPushButton;
+class QFrame;
+class QTimer;
+class QUdpSocket;
 
 class DroneWidget : public QGroupBox {
     Q_OBJECT
 public:
     explicit DroneWidget(QWidget *parent = nullptr);
 
+public slots:
+    void updateMeshNodes(const QList<MeshNode> &nodes);
+    void setDefaultTargetHost(const QString &host);
+
 private slots:
-    void onLoadFile();
-    void onSend();
-    void onConnected();
-    void onError(QAbstractSocket::SocketError err);
-    void onBytesWritten(qint64 bytes);
-    void onDisconnected();
+    void refreshDroneStates();
+    void onUdpReadyRead();
 
 private:
+    struct PendingRequest {
+        int     octet{0};
+        QString method;
+    };
+
     void buildUi();
+    void createNodeCard(class QGridLayout *grid, int row, int octet);
     void setStatus(const QString &text, const QString &color = "#888aaa");
+    void setNodeActive(int octet, bool active);
+    void updateNodeTimestamp(int octet, const QString &text);
+    QString nodeIp(int octet) const;
+    void sendRpcRequest(int octet, const QString &method);
 
-    QLineEdit   *file_path_edit_;
-    QLineEdit   *ip_edit_;
-    QSpinBox    *port_spin_;
-    QPushButton *btn_load_;
-    QPushButton *btn_send_;
+    QLineEdit   *target_host_edit_;
     QLabel      *status_label_;
+    QLabel      *refresh_label_;
+    QPushButton *btn_refresh_;
 
-    QTcpSocket  *socket_;
-    QByteArray   file_data_;
-    qint64       bytes_written_{0};
+    QTimer      *refresh_timer_;
+    QUdpSocket  *udp_socket_;
+    int          next_request_id_{1};
+    QHash<int, PendingRequest> pending_requests_;
+    QHash<int, bool> active_nodes_;
+    QHash<int, QFrame*> node_cards_;
+    QHash<int, QLabel*> state_labels_;
+    QHash<int, QLabel*> host_labels_;
+    QHash<int, QLabel*> battery_labels_;
+    QHash<int, QLabel*> altitude_labels_;
+    QHash<int, QLabel*> heading_labels_;
+    QHash<int, QLabel*> gps_labels_;
+    QHash<int, QLabel*> updated_labels_;
 };
 
 #endif // DRONEWIDGET_H

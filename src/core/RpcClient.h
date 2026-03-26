@@ -7,6 +7,7 @@
 #include <QJsonObject>
 #include <QMap>
 #include <QAbstractSocket>
+#include <QProcess>
 #include <functional>
 
 class QTcpSocket;
@@ -37,9 +38,16 @@ private slots:
     void onError(QAbstractSocket::SocketError err);
 
 private:
+    bool ensureRelay();
+    void stopRelay();
+
     QTcpSocket *socket_;
+    QProcess   *relay_process_{nullptr};
     QString     host_;
+    QString     relay_target_host_;
     quint16     port_{7001};
+    quint16     relay_target_port_{0};
+    quint16     relay_listen_port_{0};
     int         next_id_{1};
     QByteArray  recv_buf_;
     QMap<int, std::function<void(QJsonObject)>> pending_;

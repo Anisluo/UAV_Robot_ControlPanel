@@ -20,93 +20,99 @@ UGVWidget::UGVWidget(RpcClient *rpc, QWidget *parent)
 
 void UGVWidget::buildUi()
 {
-    auto *mainLayout = new QVBoxLayout(this);
-    mainLayout->setSpacing(6);
+    auto *mainLayout = new QVBoxLayout;
+    mainLayout->setSpacing(8);
     mainLayout->setContentsMargins(8, 18, 8, 8);
+    setLayout(mainLayout);
+
+    auto *hint = new QLabel("差速底盘: 前后=Vx, 左右=转向, 不支持横移", this);
+    hint->setStyleSheet("color: #9ad7de; font-family: Consolas; font-size: 12px;");
+    mainLayout->addWidget(hint);
 
     auto *grid = new QGridLayout;
     grid->setSpacing(6);
 
-    // Vx row
     auto *vxLabel = new QLabel("Vx (m/s)", this);
     vxLabel->setStyleSheet("color: #00c8d7; font-family: Consolas;");
     vx_slider_ = new QSlider(Qt::Horizontal, this);
     vx_slider_->setRange(-100, 100);
-    vx_slider_->setValue(0);
+    vx_slider_->setValue(20);
     vx_spin_ = new QDoubleSpinBox(this);
     vx_spin_->setRange(-1.0, 1.0);
     vx_spin_->setSingleStep(0.05);
     vx_spin_->setDecimals(2);
-    vx_spin_->setValue(0.0);
+    vx_spin_->setValue(0.20);
     vx_spin_->setFixedWidth(85);
 
-    // Vy row
-    auto *vyLabel = new QLabel("Vy (m/s)", this);
-    vyLabel->setStyleSheet("color: #00c8d7; font-family: Consolas;");
-    vy_slider_ = new QSlider(Qt::Horizontal, this);
-    vy_slider_->setRange(-100, 100);
-    vy_slider_->setValue(0);
-    vy_spin_ = new QDoubleSpinBox(this);
-    vy_spin_->setRange(-1.0, 1.0);
-    vy_spin_->setSingleStep(0.05);
-    vy_spin_->setDecimals(2);
-    vy_spin_->setValue(0.0);
-    vy_spin_->setFixedWidth(85);
-
-    // Omega row
     auto *omegaLabel = new QLabel("ω (rad/s)", this);
     omegaLabel->setStyleSheet("color: #00c8d7; font-family: Consolas;");
     omega_slider_ = new QSlider(Qt::Horizontal, this);
     omega_slider_->setRange(-314, 314);
-    omega_slider_->setValue(0);
+    omega_slider_->setValue(60);
     omega_spin_ = new QDoubleSpinBox(this);
     omega_spin_->setRange(-3.14, 3.14);
     omega_spin_->setSingleStep(0.05);
     omega_spin_->setDecimals(3);
-    omega_spin_->setValue(0.0);
+    omega_spin_->setValue(0.60);
     omega_spin_->setFixedWidth(85);
 
-    grid->addWidget(vxLabel,      0, 0);
-    grid->addWidget(vx_slider_,   0, 1);
-    grid->addWidget(vx_spin_,     0, 2);
-    grid->addWidget(vyLabel,      1, 0);
-    grid->addWidget(vy_slider_,   1, 1);
-    grid->addWidget(vy_spin_,     1, 2);
-    grid->addWidget(omegaLabel,   2, 0);
-    grid->addWidget(omega_slider_, 2, 1);
-    grid->addWidget(omega_spin_,  2, 2);
+    grid->addWidget(vxLabel,       0, 0);
+    grid->addWidget(vx_slider_,    0, 1);
+    grid->addWidget(vx_spin_,      0, 2);
+    grid->addWidget(omegaLabel,    1, 0);
+    grid->addWidget(omega_slider_, 1, 1);
+    grid->addWidget(omega_spin_,   1, 2);
     grid->setColumnStretch(1, 1);
-
     mainLayout->addLayout(grid);
 
-    // Buttons
-    auto *btnRow = new QHBoxLayout;
-    btnRow->setSpacing(8);
+    auto *pad = new QGridLayout;
+    pad->setSpacing(8);
 
-    btn_send_ = new QPushButton("发送速度", this);
-    btn_stop_ = new QPushButton("急停", this);
+    btn_forward_ = new QPushButton("前进", this);
+    btn_backward_ = new QPushButton("后退", this);
+    btn_turn_left_ = new QPushButton("左转", this);
+    btn_turn_right_ = new QPushButton("右转", this);
+    btn_stop_ = new QPushButton("停止", this);
+    btn_send_ = new QPushButton("发送当前速度", this);
+
     btn_stop_->setObjectName("stopButton");
-    btn_stop_->setFixedHeight(36);
+    btn_forward_->setFixedHeight(34);
+    btn_backward_->setFixedHeight(34);
+    btn_turn_left_->setFixedHeight(34);
+    btn_turn_right_->setFixedHeight(34);
+    btn_stop_->setFixedHeight(34);
+    btn_send_->setFixedHeight(34);
 
-    btnRow->addWidget(btn_send_);
-    btnRow->addWidget(btn_stop_);
-    mainLayout->addLayout(btnRow);
+    pad->addWidget(btn_forward_,    0, 1);
+    pad->addWidget(btn_turn_left_,  1, 0);
+    pad->addWidget(btn_stop_,       1, 1);
+    pad->addWidget(btn_turn_right_, 1, 2);
+    pad->addWidget(btn_backward_,   2, 1);
+    mainLayout->addLayout(pad);
+    mainLayout->addWidget(btn_send_);
 
-    // Connect sliders
     connect(vx_slider_, &QSlider::valueChanged, this, &UGVWidget::onVxSliderChanged);
     connect(vx_spin_, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
             this, &UGVWidget::onVxSpinChanged);
-
-    connect(vy_slider_, &QSlider::valueChanged, this, &UGVWidget::onVySliderChanged);
-    connect(vy_spin_, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
-            this, &UGVWidget::onVySpinChanged);
-
     connect(omega_slider_, &QSlider::valueChanged, this, &UGVWidget::onOmegaSliderChanged);
     connect(omega_spin_, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
             this, &UGVWidget::onOmegaSpinChanged);
 
-    connect(btn_send_, &QPushButton::clicked, this, &UGVWidget::sendVelocity);
+    connect(btn_send_, &QPushButton::clicked, this, [this]() { sendVelocity(); });
     connect(btn_stop_, &QPushButton::clicked, this, &UGVWidget::onStop);
+
+    connect(btn_forward_, &QPushButton::clicked, this, [this]() {
+        sendVelocity(vx_spin_->value(), 0.0);
+    });
+    connect(btn_backward_, &QPushButton::clicked, this, [this]() {
+        sendVelocity(-vx_spin_->value(), 0.0);
+    });
+    connect(btn_turn_left_, &QPushButton::clicked, this, [this]() {
+        sendVelocity(0.0, omega_spin_->value());
+    });
+    connect(btn_turn_right_, &QPushButton::clicked, this, [this]() {
+        sendVelocity(0.0, -omega_spin_->value());
+    });
 }
 
 void UGVWidget::onVxSliderChanged(int value)
@@ -124,21 +130,6 @@ void UGVWidget::onVxSpinChanged(double value)
     vx_slider_->blockSignals(blocked);
 }
 
-void UGVWidget::onVySliderChanged(int value)
-{
-    double v = value / 100.0;
-    bool blocked = vy_spin_->blockSignals(true);
-    vy_spin_->setValue(v);
-    vy_spin_->blockSignals(blocked);
-}
-
-void UGVWidget::onVySpinChanged(double value)
-{
-    bool blocked = vy_slider_->blockSignals(true);
-    vy_slider_->setValue(static_cast<int>(value * 100));
-    vy_slider_->blockSignals(blocked);
-}
-
 void UGVWidget::onOmegaSliderChanged(int value)
 {
     double v = value / 100.0;
@@ -154,41 +145,43 @@ void UGVWidget::onOmegaSpinChanged(double value)
     omega_slider_->blockSignals(blocked);
 }
 
-void UGVWidget::sendVelocity()
+void UGVWidget::sendVelocity(double vx, double omega)
 {
     if (!rpc_ || !rpc_->isConnected()) return;
 
     QJsonObject params;
-    params[Protocol::Fields::VX]    = vx_spin_->value();
-    params[Protocol::Fields::VY]    = vy_spin_->value();
-    params[Protocol::Fields::OMEGA] = omega_spin_->value();
+    params[Protocol::Fields::VX]    = vx;
+    params[Protocol::Fields::VY]    = 0.0;
+    params[Protocol::Fields::OMEGA] = omega;
     rpc_->call(Protocol::Methods::UGV_SET_VELOCITY, params);
 }
 
-void UGVWidget::onStop()
+void UGVWidget::sendVelocity()
 {
-    if (!rpc_ || !rpc_->isConnected()) return;
-    rpc_->call(Protocol::Methods::UGV_STOP, QJsonObject{});
+    sendVelocity(vx_spin_->value(), omega_spin_->value());
+}
 
-    // Reset sliders to zero
+void UGVWidget::resetInputs()
+{
     bool b1 = vx_slider_->blockSignals(true);
     bool b2 = vx_spin_->blockSignals(true);
-    bool b3 = vy_slider_->blockSignals(true);
-    bool b4 = vy_spin_->blockSignals(true);
-    bool b5 = omega_slider_->blockSignals(true);
-    bool b6 = omega_spin_->blockSignals(true);
+    bool b3 = omega_slider_->blockSignals(true);
+    bool b4 = omega_spin_->blockSignals(true);
 
     vx_slider_->setValue(0);
     vx_spin_->setValue(0.0);
-    vy_slider_->setValue(0);
-    vy_spin_->setValue(0.0);
     omega_slider_->setValue(0);
     omega_spin_->setValue(0.0);
 
     vx_slider_->blockSignals(b1);
     vx_spin_->blockSignals(b2);
-    vy_slider_->blockSignals(b3);
-    vy_spin_->blockSignals(b4);
-    omega_slider_->blockSignals(b5);
-    omega_spin_->blockSignals(b6);
+    omega_slider_->blockSignals(b3);
+    omega_spin_->blockSignals(b4);
+}
+
+void UGVWidget::onStop()
+{
+    if (rpc_ && rpc_->isConnected()) {
+        rpc_->call(Protocol::Methods::UGV_STOP, QJsonObject{});
+    }
 }

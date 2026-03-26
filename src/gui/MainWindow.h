@@ -6,6 +6,7 @@
 
 class RpcClient;
 class VideoClient;
+class MeshPinger;
 class CameraWidget;
 class LogWidget;
 class ArmWidget;
@@ -51,6 +52,7 @@ private:
     // Core clients
     RpcClient    *rpc_client_;
     VideoClient  *video_client_;
+    MeshPinger   *mesh_pinger_;
 
     // GUI widgets
     QTabWidget   *tab_widget_;

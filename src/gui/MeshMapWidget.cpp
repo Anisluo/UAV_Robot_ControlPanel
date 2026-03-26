@@ -9,8 +9,8 @@
 MeshMapWidget::MeshMapWidget(QWidget *parent)
     : QGroupBox("无线通信网络", parent)
 {
-    setMinimumHeight(200);
-    setMaximumHeight(200);
+    setMinimumHeight(240);
+    setMaximumHeight(240);
     populateDemoNodes();
 }
 
@@ -24,20 +24,32 @@ void MeshMapWidget::populateDemoNodes()
 {
     nodes_.clear();
 
-    // 5 demo nodes spread across the widget
-    MeshNode n0; n0.id = 0; n0.x = 0.15f; n0.y = 0.5f;  n0.rssi = -40; n0.reachable = true;
-    MeshNode n1; n1.id = 1; n1.x = 0.38f; n1.y = 0.2f;  n1.rssi = -55; n1.reachable = true;
-    MeshNode n2; n2.id = 2; n2.x = 0.55f; n2.y = 0.75f; n2.rssi = -65; n2.reachable = true;
-    MeshNode n3; n3.id = 3; n3.x = 0.75f; n3.y = 0.3f;  n3.rssi = -75; n3.reachable = false;
-    MeshNode n4; n4.id = 4; n4.x = 0.88f; n4.y = 0.65f; n4.rssi = -50; n4.reachable = true;
-
-    nodes_ << n0 << n1 << n2 << n3 << n4;
+    // Placeholder mesh layout:
+    // .101 = host / gateway
+    // .102~.106 = UAV nodes
+    static const struct { int id; float x; float y; } kLayout[] = {
+        { 101, 0.50f, 0.18f },
+        { 102, 0.14f, 0.58f },
+        { 103, 0.32f, 0.78f },
+        { 104, 0.50f, 0.60f },
+        { 105, 0.68f, 0.78f },
+        { 106, 0.86f, 0.58f },
+    };
+    for (const auto &k : kLayout) {
+        MeshNode n;
+        n.id        = k.id;
+        n.x         = k.x;
+        n.y         = k.y;
+        n.rssi      = 0;
+        n.reachable = false;
+        nodes_ << n;
+    }
 }
 
 QPointF MeshMapWidget::nodePos(const MeshNode &n) const
 {
     // Map canvas = inside the group box content area
-    int margin = 26;
+    int margin = 30;
     int cx = static_cast<int>(margin + n.x * (width()  - margin * 2));
     int cy = static_cast<int>(margin + n.y * (height() - margin * 2));
     return QPointF(cx, cy);
@@ -72,17 +84,76 @@ void MeshMapWidget::paintEvent(QPaintEvent *event)
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing);
 
-    // Draw edges between all reachable nodes
+    // Draw the static mesh skeleton first so all 6 nodes always appear connected.
+    auto drawSkeletonLink = [&p, this](const MeshNode &a, const MeshNode &b) {
+        QPen pen(QColor(0x66, 0x6b, 0x7f, 180), 1.0);
+        pen.setStyle(Qt::DashLine);
+        p.setPen(pen);
+        p.drawLine(nodePos(a), nodePos(b));
+    };
+
+    const MeshNode *hostNode = nullptr;
+    for (const MeshNode &n : nodes_) {
+        if (n.id == 101) {
+            hostNode = &n;
+            break;
+        }
+    }
+
+    if (hostNode) {
+        for (const MeshNode &n : nodes_) {
+            if (n.id == 101) {
+                continue;
+            }
+            drawSkeletonLink(*hostNode, n);
+        }
+    }
+
     for (int i = 0; i < nodes_.size(); ++i) {
         for (int j = i + 1; j < nodes_.size(); ++j) {
             const MeshNode &a = nodes_[i];
             const MeshNode &b = nodes_[j];
+            if (a.id == 101 || b.id == 101) continue;
+            drawSkeletonLink(a, b);
+        }
+    }
+
+    // Draw host-to-node links for active mesh nodes.
+    if (hostNode && hostNode->reachable) {
+        for (const MeshNode &n : nodes_) {
+            if (n.id == 101 || !n.reachable) {
+                continue;
+            }
+
+            int avgRssi = (hostNode->rssi + n.rssi) / 2;
+            if (avgRssi == 0) {
+                avgRssi = -50;
+            }
+            int thickness = rssiToThickness(avgRssi);
+            QColor lineColor = rssiToColor(avgRssi);
+            lineColor.setAlpha(170);
+
+            QPen pen(lineColor, thickness);
+            p.setPen(pen);
+            p.drawLine(nodePos(*hostNode), nodePos(n));
+        }
+    }
+
+    // Draw lateral links between active UAV nodes for a mesh feel.
+    for (int i = 0; i < nodes_.size(); ++i) {
+        for (int j = i + 1; j < nodes_.size(); ++j) {
+            const MeshNode &a = nodes_[i];
+            const MeshNode &b = nodes_[j];
+            if (a.id == 101 || b.id == 101) continue;
             if (!a.reachable || !b.reachable) continue;
 
             int avgRssi = (a.rssi + b.rssi) / 2;
+            if (avgRssi == 0) {
+                avgRssi = -55;
+            }
             int thickness = rssiToThickness(avgRssi);
             QColor lineColor = rssiToColor(avgRssi);
-            lineColor.setAlpha(160);
+            lineColor.setAlpha(80);
 
             QPen pen(lineColor, thickness);
             p.setPen(pen);
@@ -97,21 +168,23 @@ void MeshMapWidget::paintEvent(QPaintEvent *event)
     p.setFont(labelFont);
     QFontMetrics fm(labelFont);
 
-    const int NODE_RADIUS = 8;
+    const int NODE_RADIUS = 10;
 
     for (const MeshNode &n : nodes_) {
         QPointF pos = nodePos(n);
 
         // Node circle
         QColor nodeColor = n.reachable ? QColor(0x4c, 0xaf, 0x50) : QColor(0x55, 0x57, 0x70);
-        QColor borderColor = n.reachable ? QColor(0x00, 0xc8, 0xd7) : QColor(0x35, 0x36, 0x50);
+        QColor borderColor = n.reachable ? QColor(0x98, 0xe2, 0x8d) : QColor(0x35, 0x36, 0x50);
 
         p.setPen(QPen(borderColor, 1.5));
         p.setBrush(nodeColor);
         p.drawEllipse(pos, NODE_RADIUS, NODE_RADIUS);
 
-        // Node ID label
-        QString label = QString("N%1").arg(n.id);
+        // Node ID label — for IDs >= 100 show as ".101", else "N1"
+        QString label = (n.id >= 100)
+                        ? QString(".%1").arg(n.id)
+                        : QString("N%1").arg(n.id);
         QRect textBound = fm.boundingRect(label);
         int tx = static_cast<int>(pos.x()) - textBound.width() / 2;
         int ty = static_cast<int>(pos.y()) + NODE_RADIUS + textBound.height() + 1;
@@ -119,8 +192,17 @@ void MeshMapWidget::paintEvent(QPaintEvent *event)
         p.setPen(QColor(0xdd, 0xe1, 0xf0));
         p.drawText(tx, ty, label);
 
-        // RSSI label
-        if (n.reachable) {
+        QString status = n.reachable ? "activate" : "inactive";
+        QString role = (n.id == 101) ? "HOST" : "UAV";
+        QString subLabel = QString("%1  %2").arg(role, status);
+        QRect subBound = fm.boundingRect(subLabel);
+        int sx = static_cast<int>(pos.x()) - subBound.width() / 2;
+        int sy = ty + textBound.height() + 1;
+        p.setPen(n.reachable ? QColor(0x98, 0xe2, 0x8d) : QColor(0x7f, 0x8a, 0xa3));
+        p.drawText(sx, sy, subLabel);
+
+        // RSSI label (omit when rssi == 0, e.g. ping-only nodes)
+        if (n.reachable && n.rssi != 0) {
             QString rssiStr = QString("%1").arg(n.rssi);
             QRect rBound = fm.boundingRect(rssiStr);
             int rx = static_cast<int>(pos.x()) - rBound.width() / 2;
