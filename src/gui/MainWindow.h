@@ -25,6 +25,7 @@ class QLabel;
 class QLineEdit;
 class QSpinBox;
 class QPushButton;
+class QRadioButton;
 class QStatusBar;
 class QSplitter;
 
@@ -42,6 +43,7 @@ private slots:
     void onFpsUpdated(double fps);
     void onLogMessage(const QString &msg);
     void onPingResult();
+    void onVideoEnabledToggled(bool checked);
 
 private:
     void buildUi();
@@ -74,6 +76,7 @@ private:
     QLineEdit    *host_edit_;
     QSpinBox     *rpc_port_spin_;
     QSpinBox     *video_port_spin_;
+    QRadioButton *video_enable_radio_;
     QPushButton  *btn_connect_;
     QPushButton  *btn_disconnect_;
     QLabel       *led_label_;

@@ -9,7 +9,11 @@
 #include <QDoubleSpinBox>
 #include <QPushButton>
 #include <QLabel>
+#include <QRadioButton>
 #include <QJsonObject>
+#include <QtGlobal>
+
+#include <cmath>
 
 UGVWidget::UGVWidget(RpcClient *rpc, QWidget *parent)
     : QGroupBox("六轮无人车 [CAN]", parent)
@@ -44,6 +48,16 @@ void UGVWidget::buildUi()
     vx_spin_->setValue(0.20);
     vx_spin_->setFixedWidth(85);
 
+    vx_limit_radio_ = new QRadioButton("启用前进/后退速度上限", this);
+    vx_limit_spin_ = new QDoubleSpinBox(this);
+    vx_limit_spin_->setRange(0.10, 3.00);
+    vx_limit_spin_->setSingleStep(0.05);
+    vx_limit_spin_->setDecimals(2);
+    vx_limit_spin_->setSuffix(" m/s");
+    vx_limit_spin_->setValue(DEFAULT_VX_LIMIT);
+    vx_limit_spin_->setFixedWidth(110);
+    vx_limit_spin_->setEnabled(false);
+
     auto *omegaLabel = new QLabel("ω (rad/s)", this);
     omegaLabel->setStyleSheet("color: #00c8d7; font-family: Consolas;");
     omega_slider_ = new QSlider(Qt::Horizontal, this);
@@ -59,9 +73,11 @@ void UGVWidget::buildUi()
     grid->addWidget(vxLabel,       0, 0);
     grid->addWidget(vx_slider_,    0, 1);
     grid->addWidget(vx_spin_,      0, 2);
-    grid->addWidget(omegaLabel,    1, 0);
-    grid->addWidget(omega_slider_, 1, 1);
-    grid->addWidget(omega_spin_,   1, 2);
+    grid->addWidget(vx_limit_radio_, 1, 0, 1, 2);
+    grid->addWidget(vx_limit_spin_,  1, 2);
+    grid->addWidget(omegaLabel,    2, 0);
+    grid->addWidget(omega_slider_, 2, 1);
+    grid->addWidget(omega_spin_,   2, 2);
     grid->setColumnStretch(1, 1);
     mainLayout->addLayout(grid);
 
@@ -94,6 +110,9 @@ void UGVWidget::buildUi()
     connect(vx_slider_, &QSlider::valueChanged, this, &UGVWidget::onVxSliderChanged);
     connect(vx_spin_, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
             this, &UGVWidget::onVxSpinChanged);
+    connect(vx_limit_radio_, &QRadioButton::toggled, this, &UGVWidget::onVxLimitToggled);
+    connect(vx_limit_spin_, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+            this, &UGVWidget::onVxLimitChanged);
     connect(omega_slider_, &QSlider::valueChanged, this, &UGVWidget::onOmegaSliderChanged);
     connect(omega_spin_, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
             this, &UGVWidget::onOmegaSpinChanged);
@@ -113,6 +132,8 @@ void UGVWidget::buildUi()
     connect(btn_turn_right_, &QPushButton::clicked, this, [this]() {
         sendVelocity(0.0, -omega_spin_->value());
     });
+
+    applyVxLimit(DEFAULT_VX_LIMIT);
 }
 
 void UGVWidget::onVxSliderChanged(int value)
@@ -126,8 +147,20 @@ void UGVWidget::onVxSliderChanged(int value)
 void UGVWidget::onVxSpinChanged(double value)
 {
     bool blocked = vx_slider_->blockSignals(true);
-    vx_slider_->setValue(static_cast<int>(value * 100));
+    vx_slider_->setValue(static_cast<int>(value * VELOCITY_SCALE));
     vx_slider_->blockSignals(blocked);
+}
+
+void UGVWidget::onVxLimitToggled(bool checked)
+{
+    vx_limit_spin_->setEnabled(checked);
+    applyVxLimit(checked ? vx_limit_spin_->value() : DEFAULT_VX_LIMIT);
+}
+
+void UGVWidget::onVxLimitChanged(double value)
+{
+    if (!vx_limit_radio_ || !vx_limit_radio_->isChecked()) return;
+    applyVxLimit(value);
 }
 
 void UGVWidget::onOmegaSliderChanged(int value)
@@ -177,6 +210,34 @@ void UGVWidget::resetInputs()
     vx_spin_->blockSignals(b2);
     omega_slider_->blockSignals(b3);
     omega_spin_->blockSignals(b4);
+}
+
+void UGVWidget::applyVxLimit(double limit_abs)
+{
+    const double limit = qBound(0.10, limit_abs, 3.00);
+    const int slider_limit = static_cast<int>(std::lround(limit * VELOCITY_SCALE));
+
+    bool b1 = vx_slider_->blockSignals(true);
+    bool b2 = vx_spin_->blockSignals(true);
+
+    vx_slider_->setRange(-slider_limit, slider_limit);
+    vx_spin_->setRange(-limit, limit);
+
+    if (vx_slider_->value() > slider_limit) vx_slider_->setValue(slider_limit);
+    if (vx_slider_->value() < -slider_limit) vx_slider_->setValue(-slider_limit);
+    if (vx_spin_->value() > limit) vx_spin_->setValue(limit);
+    if (vx_spin_->value() < -limit) vx_spin_->setValue(-limit);
+
+    vx_slider_->blockSignals(b1);
+    vx_spin_->blockSignals(b2);
+}
+
+double UGVWidget::currentVxLimit() const
+{
+    if (vx_limit_radio_ && vx_limit_radio_->isChecked()) {
+        return vx_limit_spin_->value();
+    }
+    return DEFAULT_VX_LIMIT;
 }
 
 void UGVWidget::onStop()

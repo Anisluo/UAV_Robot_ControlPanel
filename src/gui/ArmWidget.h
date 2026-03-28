@@ -5,10 +5,10 @@
 #include <QList>
 
 class RpcClient;
-class QSlider;
 class QDoubleSpinBox;
 class QPushButton;
 class QTimer;
+class QLabel;
 
 class ArmWidget : public QGroupBox {
     Q_OBJECT
@@ -16,26 +16,33 @@ public:
     explicit ArmWidget(RpcClient *rpc, QWidget *parent = nullptr);
 
 private slots:
-    void onSliderChanged(int axis, int value);
-    void onSpinboxChanged(int axis, double value);
-    void sendJoints();
+    void onSet();
     void onHome();
     void onEnable();
     void onDisable();
+    void onEstop();
+    void requestAngles();
 
 private:
     void buildUi();
-    void setJointValue(int axis, double degrees, bool blockSignals);
-    double jointValue(int axis) const;
+    void setCurrentAngleValue(int axis, double degrees);
 
-    RpcClient         *rpc_;
-    QList<QSlider*>    sliders_;
-    QList<QDoubleSpinBox*> spinboxes_;
-    QTimer            *debounce_timer_;
+    RpcClient *rpc_;
 
-    QPushButton *btn_home_;
+    // Per-axis: target angle spinbox, current angle label, home-safe-pos spinbox
+    QList<QDoubleSpinBox*> target_spins_;
+    QList<QLabel*>         current_labels_;
+    QList<QDoubleSpinBox*> safe_spins_;
+
+    QTimer *poll_timer_;
+    bool    angle_request_in_flight_{false};
+
     QPushButton *btn_enable_;
     QPushButton *btn_disable_;
+    QPushButton *btn_set_;
+    QPushButton *btn_estop_;
+    QPushButton *btn_home_;
+    QLabel      *status_label_;
 };
 
 #endif // ARMWIDGET_H

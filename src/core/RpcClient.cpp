@@ -40,26 +40,8 @@ void RpcClient::connectToHost()
     pending_.clear();
     emit logMessage(QString("[RPC] Connecting to %1:%2 ...").arg(host_).arg(port_));
 
-    QString connectHost = host_;
-    quint16 connectPort = port_;
-    if (host_ != "127.0.0.1" && host_ != "localhost") {
-        if (!ensureRelay()) {
-            emit logMessage("[RPC] Failed to start local relay");
-            emit disconnected();
-            return;
-        }
-        connectHost = "127.0.0.1";
-        connectPort = relay_listen_port_;
-        emit logMessage(QString("[RPC] Using local relay %1:%2 -> %3:%4")
-                        .arg(connectHost)
-                        .arg(connectPort)
-                        .arg(host_)
-                        .arg(port_));
-    } else {
-        stopRelay();
-    }
-
-    socket_->connectToHost(connectHost, connectPort);
+    stopRelay();
+    socket_->connectToHost(host_, port_);
 }
 
 void RpcClient::disconnectFromHost()
@@ -185,6 +167,7 @@ bool RpcClient::ensureRelay()
 
     static const char kRelayScript[] = R"PY(
 import socket, threading, sys
+import time
 LISTEN_HOST = '127.0.0.1'
 TARGET_HOST = sys.argv[1]
 TARGET_PORT = int(sys.argv[2])
@@ -194,6 +177,19 @@ ls.bind((LISTEN_HOST, 0))
 LISTEN_PORT = ls.getsockname()[1]
 print(LISTEN_PORT, flush=True)
 ls.listen(5)
+
+def connect_with_retry(host, port, total_timeout=15.0, step_timeout=3.0, retry_delay=0.3):
+    deadline = time.time() + total_timeout
+    last_error = None
+    while time.time() < deadline:
+        try:
+            return socket.create_connection((host, port), timeout=step_timeout)
+        except Exception as exc:
+            last_error = exc
+            time.sleep(retry_delay)
+    if last_error is not None:
+        raise last_error
+    raise TimeoutError('timed out')
 
 def pump(src, dst):
     try:
@@ -214,7 +210,15 @@ def pump(src, dst):
 
 while True:
     client, _addr = ls.accept()
-    server = socket.create_connection((TARGET_HOST, TARGET_PORT), timeout=5)
+    try:
+        server = connect_with_retry(TARGET_HOST, TARGET_PORT)
+    except Exception as exc:
+        try:
+            client.close()
+        except Exception:
+            pass
+        print(f"connect relay failed: {exc}", flush=True)
+        continue
     client.settimeout(None)
     server.settimeout(None)
     threading.Thread(target=pump, args=(client, server), daemon=True).start()

@@ -2,17 +2,18 @@
 #include "core/RpcClient.h"
 #include "core/Protocol.h"
 
-#include <QVBoxLayout>
-#include <QHBoxLayout>
+#include <QFrame>
 #include <QGridLayout>
+#include <QHBoxLayout>
+#include <QJsonObject>
+#include <QLabel>
+#include <QPushButton>
 #include <QSlider>
 #include <QSpinBox>
-#include <QPushButton>
-#include <QLabel>
-#include <QJsonObject>
+#include <QVBoxLayout>
 
 AirportWidget::AirportWidget(RpcClient *rpc, QWidget *parent)
-    : QGroupBox("机场平台 [CAN]", parent)
+    : QGroupBox("机场平台 [CAN1 / ZDT]", parent)
     , rpc_(rpc)
 {
     buildUi();
@@ -21,108 +22,185 @@ AirportWidget::AirportWidget(RpcClient *rpc, QWidget *parent)
 void AirportWidget::buildUi()
 {
     auto *mainLayout = new QVBoxLayout(this);
-    mainLayout->setSpacing(6);
+    mainLayout->setSpacing(8);
     mainLayout->setContentsMargins(8, 18, 8, 8);
 
-    auto *grid = new QGridLayout;
-    grid->setSpacing(6);
+    auto makeTitle = [this](const QString &text) {
+        auto *label = new QLabel(text, this);
+        label->setStyleSheet("color: #00c8d7; font-family: Consolas; font-weight: bold;");
+        return label;
+    };
 
-    for (int i = 0; i < 3; ++i) {
-        auto *label = new QLabel(QString("导轨%1").arg(i + 1), this);
-        label->setStyleSheet("color: #00c8d7; font-family: Consolas;");
-        label->setFixedWidth(55);
+    auto makePanel = [this]() {
+        auto *frame = new QFrame(this);
+        frame->setFrameShape(QFrame::StyledPanel);
+        frame->setStyleSheet("QFrame { border: 1px solid #2d3a52; border-radius: 6px; }");
+        return frame;
+    };
 
-        auto *slider = new QSlider(Qt::Horizontal, this);
-        slider->setRange(0, 1000);
-        slider->setValue(0);
+    auto *pairPanel = makePanel();
+    auto *pairLayout = new QVBoxLayout(pairPanel);
+    pairLayout->setSpacing(6);
 
-        auto *spinbox = new QSpinBox(this);
-        spinbox->setRange(0, 1000);
-        spinbox->setSuffix(" mm");
-        spinbox->setValue(0);
-        spinbox->setFixedWidth(90);
+    pairLayout->addWidget(makeTitle("导轨1 + 导轨3 联动"));
 
-        auto *setBtn = new QPushButton("设置", this);
-        setBtn->setFixedWidth(50);
-        setBtn->setFixedHeight(26);
+    auto *pairGrid = new QGridLayout;
+    pairGrid->setHorizontalSpacing(6);
+    pairGrid->setVerticalSpacing(6);
 
-        rail_sliders_.append(slider);
-        rail_spins_.append(spinbox);
-        rail_set_btns_.append(setBtn);
+    auto *pairLabel = new QLabel("共用转速", this);
+    pairLabel->setFixedWidth(65);
 
-        int rail = i;
-        connect(slider, &QSlider::valueChanged, this, [this, rail](int v) {
-            onRailSliderChanged(rail, v);
-        });
-        connect(spinbox, QOverload<int>::of(&QSpinBox::valueChanged), this, [this, rail](int v) {
-            onRailSpinChanged(rail, v);
-        });
-        connect(setBtn, &QPushButton::clicked, this, [this, rail]() {
-            onSetRail(rail);
-        });
+    lock_slider_ = new QSlider(Qt::Horizontal, this);
+    lock_slider_->setRange(0, 1500);
+    lock_slider_->setValue(300);
 
-        grid->addWidget(label,   i, 0);
-        grid->addWidget(slider,  i, 1);
-        grid->addWidget(spinbox, i, 2);
-        grid->addWidget(setBtn,  i, 3);
-    }
+    lock_spin_ = new QSpinBox(this);
+    lock_spin_->setRange(0, 1500);
+    lock_spin_->setSuffix(" rpm");
+    lock_spin_->setValue(300);
+    lock_spin_->setFixedWidth(90);
 
-    grid->setColumnStretch(1, 1);
-    mainLayout->addLayout(grid);
+    lock_btn_ = new QPushButton("锁定", this);
+    lock_btn_->setFixedHeight(28);
+    release_btn_ = new QPushButton("释放", this);
+    release_btn_->setFixedHeight(28);
 
-    // All Home button
+    pairGrid->addWidget(pairLabel, 0, 0);
+    pairGrid->addWidget(lock_slider_, 0, 1);
+    pairGrid->addWidget(lock_spin_, 0, 2);
+    pairGrid->addWidget(lock_btn_, 0, 3);
+    pairGrid->addWidget(release_btn_, 0, 4);
+    pairGrid->setColumnStretch(1, 1);
+    pairLayout->addLayout(pairGrid);
+
+    auto *pairHint = new QLabel("锁定: 导轨1/3 正向运行；释放: 导轨1/3 反向运行。后端会轮询驱动堵转状态，检测到堵转保护后自动停止对应导轨。", this);
+    pairHint->setWordWrap(true);
+    pairHint->setStyleSheet("color: #888aaa;");
+    pairLayout->addWidget(pairHint);
+
+    mainLayout->addWidget(pairPanel);
+
+    auto *rail2Panel = makePanel();
+    auto *rail2Layout = new QVBoxLayout(rail2Panel);
+    rail2Layout->setSpacing(6);
+    rail2Layout->addWidget(makeTitle("导轨2 单独控制"));
+
+    auto *rail2Grid = new QGridLayout;
+    rail2Grid->setHorizontalSpacing(6);
+    rail2Grid->setVerticalSpacing(6);
+
+    auto *rail2Label = new QLabel("导轨2 rpm", this);
+    rail2Label->setFixedWidth(65);
+
+    rail2_slider_ = new QSlider(Qt::Horizontal, this);
+    rail2_slider_->setRange(0, 1500);
+    rail2_slider_->setValue(300);
+
+    rail2_spin_ = new QSpinBox(this);
+    rail2_spin_->setRange(0, 1500);
+    rail2_spin_->setSuffix(" rpm");
+    rail2_spin_->setValue(300);
+    rail2_spin_->setFixedWidth(90);
+
+    rail2_fwd_btn_ = new QPushButton("前进", this);
+    rail2_fwd_btn_->setFixedHeight(28);
+    rail2_back_btn_ = new QPushButton("后退", this);
+    rail2_back_btn_->setFixedHeight(28);
+
+    rail2Grid->addWidget(rail2Label, 0, 0);
+    rail2Grid->addWidget(rail2_slider_, 0, 1);
+    rail2Grid->addWidget(rail2_spin_, 0, 2);
+    rail2Grid->addWidget(rail2_fwd_btn_, 0, 3);
+    rail2Grid->addWidget(rail2_back_btn_, 0, 4);
+    rail2Grid->setColumnStretch(1, 1);
+    rail2Layout->addLayout(rail2Grid);
+
+    auto *rail2Hint = new QLabel("导轨2 继续使用单独速度控制，前进/后退直接发送速度命令。", this);
+    rail2Hint->setWordWrap(true);
+    rail2Hint->setStyleSheet("color: #888aaa;");
+    rail2Layout->addWidget(rail2Hint);
+
+    mainLayout->addWidget(rail2Panel);
+
     auto *btnRow = new QHBoxLayout;
-    btn_all_home_ = new QPushButton("全部回零", this);
-    btn_all_home_->setFixedHeight(28);
-    btnRow->addWidget(btn_all_home_);
+    stop_all_btn_ = new QPushButton("全部急停", this);
+    stop_all_btn_->setFixedHeight(30);
+    btnRow->addWidget(stop_all_btn_);
     btnRow->addStretch();
     mainLayout->addLayout(btnRow);
 
-    connect(btn_all_home_, &QPushButton::clicked, this, &AirportWidget::onAllHome);
+    connect(lock_slider_, &QSlider::valueChanged, this, &AirportWidget::onLockSliderChanged);
+    connect(lock_spin_, QOverload<int>::of(&QSpinBox::valueChanged), this, &AirportWidget::onLockSpinChanged);
+    connect(rail2_slider_, &QSlider::valueChanged, this, &AirportWidget::onRail2SliderChanged);
+    connect(rail2_spin_, QOverload<int>::of(&QSpinBox::valueChanged), this, &AirportWidget::onRail2SpinChanged);
+    connect(lock_btn_, &QPushButton::clicked, this, &AirportWidget::onLock);
+    connect(release_btn_, &QPushButton::clicked, this, &AirportWidget::onRelease);
+    connect(rail2_fwd_btn_, &QPushButton::clicked, this, [this]() { onRail2Move(true); });
+    connect(rail2_back_btn_, &QPushButton::clicked, this, [this]() { onRail2Move(false); });
+    connect(stop_all_btn_, &QPushButton::clicked, this, &AirportWidget::onStopAll);
 }
 
-void AirportWidget::onRailSliderChanged(int rail, int value)
+void AirportWidget::syncSliderAndSpin(QSlider *slider, QSpinBox *spinbox, int value)
 {
-    bool blocked = rail_spins_[rail]->blockSignals(true);
-    rail_spins_[rail]->setValue(value);
-    rail_spins_[rail]->blockSignals(blocked);
+    bool sliderBlocked = slider->blockSignals(true);
+    bool spinBlocked = spinbox->blockSignals(true);
+    slider->setValue(value);
+    spinbox->setValue(value);
+    slider->blockSignals(sliderBlocked);
+    spinbox->blockSignals(spinBlocked);
 }
 
-void AirportWidget::onRailSpinChanged(int rail, int value)
+void AirportWidget::onLockSliderChanged(int value)
 {
-    bool blocked = rail_sliders_[rail]->blockSignals(true);
-    rail_sliders_[rail]->setValue(value);
-    rail_sliders_[rail]->blockSignals(blocked);
+    syncSliderAndSpin(lock_slider_, lock_spin_, value);
 }
 
-void AirportWidget::onSetRail(int rail)
+void AirportWidget::onLockSpinChanged(int value)
+{
+    syncSliderAndSpin(lock_slider_, lock_spin_, value);
+}
+
+void AirportWidget::onRail2SliderChanged(int value)
+{
+    syncSliderAndSpin(rail2_slider_, rail2_spin_, value);
+}
+
+void AirportWidget::onRail2SpinChanged(int value)
+{
+    syncSliderAndSpin(rail2_slider_, rail2_spin_, value);
+}
+
+void AirportWidget::onLock()
 {
     if (!rpc_ || !rpc_->isConnected()) return;
 
     QJsonObject params;
-    params[Protocol::Fields::RAIL]   = rail;
-    params[Protocol::Fields::POS_MM] = static_cast<double>(rail_spins_[rail]->value());
-    rpc_->call(Protocol::Methods::AIRPORT_SET_RAIL, params);
+    params[Protocol::Fields::SPEED_RPM] = lock_spin_->value();
+    rpc_->call(Protocol::Methods::AIRPORT_LOCK, params);
 }
 
-void AirportWidget::onAllHome()
+void AirportWidget::onRelease()
 {
     if (!rpc_ || !rpc_->isConnected()) return;
 
-    for (int i = 0; i < 3; ++i) {
-        QJsonObject params;
-        params[Protocol::Fields::RAIL]   = i;
-        params[Protocol::Fields::POS_MM] = 0.0;
-        rpc_->call(Protocol::Methods::AIRPORT_SET_RAIL, params);
-    }
+    QJsonObject params;
+    params[Protocol::Fields::SPEED_RPM] = lock_spin_->value();
+    rpc_->call(Protocol::Methods::AIRPORT_RELEASE, params);
+}
 
-    // Reset UI
-    for (int i = 0; i < 3; ++i) {
-        bool b1 = rail_sliders_[i]->blockSignals(true);
-        bool b2 = rail_spins_[i]->blockSignals(true);
-        rail_sliders_[i]->setValue(0);
-        rail_spins_[i]->setValue(0);
-        rail_sliders_[i]->blockSignals(b1);
-        rail_spins_[i]->blockSignals(b2);
-    }
+void AirportWidget::onRail2Move(bool forward)
+{
+    if (!rpc_ || !rpc_->isConnected()) return;
+
+    QJsonObject params;
+    params[Protocol::Fields::RAIL] = 1;
+    params[Protocol::Fields::SPEED_RPM] = rail2_spin_->value() * (forward ? 1 : -1);
+    rpc_->call(Protocol::Methods::AIRPORT_SET_SPEED, params);
+}
+
+void AirportWidget::onStopAll()
+{
+    if (!rpc_ || !rpc_->isConnected()) return;
+    rpc_->call(Protocol::Methods::AIRPORT_STOP_ALL, QJsonObject{});
 }

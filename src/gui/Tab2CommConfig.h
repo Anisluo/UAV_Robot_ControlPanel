@@ -7,6 +7,7 @@ class RpcClient;
 class QLineEdit;
 class QComboBox;
 class QSpinBox;
+class QPushButton;
 
 class Tab2CommConfig : public QWidget {
     Q_OBJECT
@@ -17,19 +18,23 @@ public:
     void setConnectionParams(const QString &host, quint16 rpcPort, quint16 videoPort);
 
 private slots:
-    void onApplyCan();
+    void onApplyCan1();
+    void onApplyCan3();
+    void onApplyCan4();
     void onApplySerial();
     void onApplyRelay();
     void onApplyEthernet();
 
 private:
     void buildUi();
+    void applyCanConfig(const QString &device, QSpinBox *bitrate_spin);
 
     RpcClient  *rpc_;
 
     // CAN
-    QComboBox  *can_device_combo_;
-    QSpinBox   *can_bitrate_spin_;
+    QSpinBox   *can1_bitrate_spin_;
+    QSpinBox   *can3_bitrate_spin_;
+    QSpinBox   *can4_bitrate_spin_;
 
     // Serial
     QLineEdit  *serial_device_edit_;

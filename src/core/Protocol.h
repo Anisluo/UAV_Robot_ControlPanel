@@ -16,11 +16,17 @@ constexpr quint16 VIDEO_PORT = 7002;
 namespace Methods {
     constexpr const char* SYSTEM_PING        = "system.ping";
     constexpr const char* ARM_SET_JOINTS     = "arm.set_joints";
+    constexpr const char* ARM_GET_ANGLES     = "arm.get_angles";
     constexpr const char* ARM_JOG            = "arm.jog";
     constexpr const char* ARM_HOME           = "arm.home";
     constexpr const char* UGV_SET_VELOCITY   = "ugv.set_velocity";
     constexpr const char* UGV_STOP           = "ugv.stop";
     constexpr const char* AIRPORT_SET_RAIL   = "airport.set_rail";
+    constexpr const char* AIRPORT_SET_SPEED  = "airport.set_speed";
+    constexpr const char* AIRPORT_STOP       = "airport.stop";
+    constexpr const char* AIRPORT_LOCK       = "airport.lock";
+    constexpr const char* AIRPORT_RELEASE    = "airport.release";
+    constexpr const char* AIRPORT_STOP_ALL   = "airport.stop_all";
     constexpr const char* AIRPORT_GRIPPER    = "airport.gripper";
     constexpr const char* ARM_GRIPPER_SET    = "arm_gripper.set";
     constexpr const char* CAMERA_SET_PROFILE = "camera.set_profile";
@@ -41,6 +47,9 @@ namespace Methods {
     constexpr const char* TASK_STOP          = "task.stop";
     constexpr const char* TASK_RESET         = "task.reset";
     constexpr const char* TASK_GET_STATUS    = "task.get_status";
+    // Video control
+    constexpr const char* VIDEO_SET_ENABLED  = "video.set_enabled";
+    constexpr const char* VIDEO_GET_STATUS   = "video.get_status";
 }
 
 // JSON field name constants
@@ -57,6 +66,7 @@ namespace Fields {
 
     // arm
     constexpr const char* JOINTS = "joints";
+    constexpr const char* ANGLES = "angles";
     constexpr const char* AXIS   = "axis";
     constexpr const char* DELTA  = "delta";
 
@@ -68,6 +78,8 @@ namespace Fields {
     // airport
     constexpr const char* RAIL   = "rail";
     constexpr const char* POS_MM = "pos_mm";
+    constexpr const char* DELTA_MM = "delta_mm";
+    constexpr const char* SPEED_RPM = "speed_rpm";
     constexpr const char* OPEN   = "open";
 
     // arm_gripper
@@ -107,6 +119,8 @@ namespace Fields {
     constexpr const char* HOST        = "host";
     constexpr const char* RPC_PORT_F  = "rpc_port";
     constexpr const char* VIDEO_PORT_F= "video_port";
+    constexpr const char* ENABLED     = "enabled";
+    constexpr const char* CLIENTS     = "clients";
 }
 
 } // namespace Protocol

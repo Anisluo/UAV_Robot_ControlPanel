@@ -15,19 +15,29 @@ public:
     explicit AirportWidget(RpcClient *rpc, QWidget *parent = nullptr);
 
 private slots:
-    void onRailSliderChanged(int rail, int value);
-    void onRailSpinChanged(int rail, int value);
-    void onSetRail(int rail);
-    void onAllHome();
+    void onLockSliderChanged(int value);
+    void onLockSpinChanged(int value);
+    void onRail2SliderChanged(int value);
+    void onRail2SpinChanged(int value);
+    void onLock();
+    void onRelease();
+    void onRail2Move(bool forward);
+    void onStopAll();
 
 private:
     void buildUi();
+    void syncSliderAndSpin(QSlider *slider, QSpinBox *spinbox, int value);
 
-    RpcClient          *rpc_;
-    QList<QSlider*>     rail_sliders_;
-    QList<QSpinBox*>    rail_spins_;
-    QList<QPushButton*> rail_set_btns_;
-    QPushButton        *btn_all_home_;
+    RpcClient   *rpc_;
+    QSlider     *lock_slider_{nullptr};
+    QSpinBox    *lock_spin_{nullptr};
+    QSlider     *rail2_slider_{nullptr};
+    QSpinBox    *rail2_spin_{nullptr};
+    QPushButton *lock_btn_{nullptr};
+    QPushButton *release_btn_{nullptr};
+    QPushButton *rail2_fwd_btn_{nullptr};
+    QPushButton *rail2_back_btn_{nullptr};
+    QPushButton *stop_all_btn_{nullptr};
 };
 
 #endif // AIRPORTWIDGET_H

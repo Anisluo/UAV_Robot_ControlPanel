@@ -4,8 +4,6 @@
 #include <QGroupBox>
 
 class RpcClient;
-class QSlider;
-class QSpinBox;
 class QPushButton;
 class QLabel;
 
@@ -17,9 +15,8 @@ public:
 private slots:
     void onAirportOpen();
     void onAirportClose();
-    void onArmSliderChanged(int value);
-    void onArmSpinChanged(int value);
-    void onArmGripperSet();
+    void onArmOpen();
+    void onArmClose();
 
 private:
     void buildUi();
@@ -32,9 +29,9 @@ private:
     QLabel      *ap_status_label_;
 
     // Arm gripper
-    QSlider     *arm_slider_;
-    QSpinBox    *arm_spin_;
-    QPushButton *btn_arm_set_;
+    QPushButton *btn_arm_open_;
+    QPushButton *btn_arm_close_;
+    QLabel      *arm_status_label_;
 };
 
 #endif // GRIPPERWIDGET_H

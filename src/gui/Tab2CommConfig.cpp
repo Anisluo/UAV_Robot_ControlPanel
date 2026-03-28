@@ -14,6 +14,7 @@
 #include <QScrollArea>
 #include <QFrame>
 #include <QJsonObject>
+#include <QString>
 
 Tab2CommConfig::Tab2CommConfig(RpcClient *rpc, QWidget *parent)
     : QWidget(parent)
@@ -51,21 +52,48 @@ void Tab2CommConfig::buildUi()
         form->setSpacing(8);
         form->setContentsMargins(8, 18, 8, 8);
 
-        can_device_combo_ = new QComboBox(grp);
-        can_device_combo_->addItems({"can0", "can1"});
-        form->addRow("设备:", can_device_combo_);
+        auto *canHint = new QLabel(
+            "can1 对应平台直线电机，can3 对应小车底盘，can4 对应机械臂。"
+            "三条总线会同时显示，可分别设置波特率。",
+            grp);
+        canHint->setWordWrap(true);
+        canHint->setStyleSheet("color: #888aaa;");
+        form->addRow("", canHint);
 
-        can_bitrate_spin_ = new QSpinBox(grp);
-        can_bitrate_spin_->setRange(10000, 1000000);
-        can_bitrate_spin_->setSingleStep(50000);
-        can_bitrate_spin_->setValue(500000);
-        can_bitrate_spin_->setSuffix(" bps");
-        form->addRow("波特率:", can_bitrate_spin_);
+        auto addCanRow = [&](const QString &device,
+                             const QString &label,
+                             int default_bitrate,
+                             QSpinBox **spin_out,
+                             void (Tab2CommConfig::*slot)()) {
+            auto *row = new QWidget(grp);
+            auto *rowLayout = new QHBoxLayout(row);
+            rowLayout->setContentsMargins(0, 0, 0, 0);
+            rowLayout->setSpacing(8);
 
-        auto *applyBtn = new QPushButton("应用", grp);
-        applyBtn->setFixedWidth(80);
-        form->addRow("", applyBtn);
-        connect(applyBtn, &QPushButton::clicked, this, &Tab2CommConfig::onApplyCan);
+            auto *nameLabel = new QLabel(label, row);
+            nameLabel->setMinimumWidth(180);
+            rowLayout->addWidget(nameLabel);
+
+            auto *bitrateSpin = new QSpinBox(row);
+            bitrateSpin->setRange(10000, 1000000);
+            bitrateSpin->setSingleStep(50000);
+            bitrateSpin->setValue(default_bitrate);
+            bitrateSpin->setSuffix(" bps");
+            rowLayout->addWidget(bitrateSpin);
+
+            auto *applyBtn = new QPushButton("应用", row);
+            applyBtn->setFixedWidth(80);
+            rowLayout->addWidget(applyBtn);
+            rowLayout->addStretch();
+
+            connect(applyBtn, &QPushButton::clicked, this, slot);
+            form->addRow(device + ":", row);
+            *spin_out = bitrateSpin;
+        };
+
+        addCanRow("can1", "平台直线电机", 500000, &can1_bitrate_spin_, &Tab2CommConfig::onApplyCan1);
+        addCanRow("can3", "小车底盘", 1000000, &can3_bitrate_spin_, &Tab2CommConfig::onApplyCan3);
+        addCanRow("can4", "机械臂", 500000, &can4_bitrate_spin_, &Tab2CommConfig::onApplyCan4);
 
         layout->addWidget(grp);
     }
@@ -159,13 +187,28 @@ void Tab2CommConfig::setConnectionParams(const QString &host, quint16 rpcPort, q
     eth_video_port_spin_->setValue(videoPort);
 }
 
-void Tab2CommConfig::onApplyCan()
+void Tab2CommConfig::applyCanConfig(const QString &device, QSpinBox *bitrate_spin)
 {
     if (!rpc_ || !rpc_->isConnected()) return;
     QJsonObject params;
-    params[Protocol::Fields::DEVICE]  = can_device_combo_->currentText();
-    params[Protocol::Fields::BITRATE] = can_bitrate_spin_->value();
+    params[Protocol::Fields::DEVICE]  = device;
+    params[Protocol::Fields::BITRATE] = bitrate_spin->value();
     rpc_->call(Protocol::Methods::CONFIG_SET_CAN, params);
+}
+
+void Tab2CommConfig::onApplyCan1()
+{
+    applyCanConfig("can1", can1_bitrate_spin_);
+}
+
+void Tab2CommConfig::onApplyCan3()
+{
+    applyCanConfig("can3", can3_bitrate_spin_);
+}
+
+void Tab2CommConfig::onApplyCan4()
+{
+    applyCanConfig("can4", can4_bitrate_spin_);
 }
 
 void Tab2CommConfig::onApplySerial()

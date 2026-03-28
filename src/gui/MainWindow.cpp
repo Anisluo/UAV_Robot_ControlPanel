@@ -26,6 +26,7 @@
 #include <QLineEdit>
 #include <QSpinBox>
 #include <QPushButton>
+#include <QRadioButton>
 #include <QStatusBar>
 #include <QFrame>
 #include <QJsonObject>
@@ -210,6 +211,13 @@ QWidget* MainWindow::buildConnectionGroup()
     portsRow->addStretch();
     layout->addLayout(portsRow);
 
+    auto *videoRow = new QHBoxLayout;
+    video_enable_radio_ = new QRadioButton("使能视频传输", grp);
+    video_enable_radio_->setChecked(true);
+    videoRow->addWidget(video_enable_radio_);
+    videoRow->addStretch();
+    layout->addLayout(videoRow);
+
     // Connect/Disconnect + LED
     auto *btnRow = new QHBoxLayout;
 
@@ -231,6 +239,7 @@ QWidget* MainWindow::buildConnectionGroup()
 
     connect(btn_connect_,    &QPushButton::clicked, this, &MainWindow::onConnect);
     connect(btn_disconnect_, &QPushButton::clicked, this, &MainWindow::onDisconnect);
+    connect(video_enable_radio_, &QRadioButton::toggled, this, &MainWindow::onVideoEnabledToggled);
 
     return grp;
 }
@@ -268,19 +277,6 @@ void MainWindow::onRpcConnected()
     btn_disconnect_->setEnabled(true);
     setLedColor("#4caf50");
     status_label_->setText("已连接: " + host_edit_->text());
-
-    // Give the socket event loop one turn before the first RPC call so
-    // reconnects do not race with any pending disconnect/close handling.
-    QTimer::singleShot(50, this, [this]() {
-        if (!rpc_client_->isConnected()) {
-            return;
-        }
-        rpc_client_->call(Protocol::Methods::SYSTEM_PING, QJsonObject{},
-            [this](QJsonObject result) {
-                Q_UNUSED(result)
-                onPingResult();
-            });
-    });
 }
 
 void MainWindow::onRpcDisconnected()
@@ -305,7 +301,16 @@ void MainWindow::onLogMessage(const QString &msg)
 void MainWindow::onPingResult()
 {
     log_widget_->appendLog("INFO", "[系统] Ping 成功 - 机器人在线。");
-    video_client_->connectToHost();
+    if (video_enable_radio_ && video_enable_radio_->isChecked()) {
+        QJsonObject params;
+        params[Protocol::Fields::ENABLED] = true;
+        rpc_client_->call(Protocol::Methods::VIDEO_SET_ENABLED, params,
+            [this](QJsonObject) {
+                if (video_enable_radio_ && video_enable_radio_->isChecked()) {
+                    video_client_->connectToHost();
+                }
+            });
+    }
 }
 
 void MainWindow::setLedColor(const QString &color)
@@ -313,4 +318,29 @@ void MainWindow::setLedColor(const QString &color)
     led_label_->setStyleSheet(
         QString("background-color: %1; border: 1px solid #555770; border-radius: 8px;")
         .arg(color));
+}
+
+void MainWindow::onVideoEnabledToggled(bool checked)
+{
+    if (!rpc_client_ || !rpc_client_->isConnected()) {
+        if (!checked) {
+            video_client_->disconnectFromHost();
+            fps_label_->setText("帧率: --");
+        }
+        return;
+    }
+
+    QJsonObject params;
+    params[Protocol::Fields::ENABLED] = checked;
+    rpc_client_->call(Protocol::Methods::VIDEO_SET_ENABLED, params,
+        [this, checked](QJsonObject) {
+            if (checked) {
+                log_widget_->appendLog("INFO", "[视频] 视频传输已使能。");
+                video_client_->connectToHost();
+            } else {
+                log_widget_->appendLog("INFO", "[视频] 视频传输已关闭。");
+                video_client_->disconnectFromHost();
+                fps_label_->setText("帧率: --");
+            }
+        });
 }

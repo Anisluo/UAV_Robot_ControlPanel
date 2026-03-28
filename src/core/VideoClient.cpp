@@ -2,19 +2,166 @@
 
 #include <QTcpSocket>
 #include <QAbstractSocket>
+#include <QMetaObject>
 #include <QThread>
 #include <QtEndian>
 
+#include <memory>
+
+class VideoWorker : public QObject {
+public:
+    explicit VideoWorker(VideoClient *owner)
+        : QObject(nullptr), owner_(owner) {}
+
+    void startStream(const QString &host, quint16 port)
+    {
+        stopStream();
+
+        recv_buf_.clear();
+        expected_size_ = 0;
+        frame_count_ = 0;
+        fps_timer_.restart();
+
+        postLog(QString("[Video] Connecting to %1:%2 ...").arg(host).arg(port));
+
+        socket_ = new QTcpSocket(this);
+        connect(socket_, &QTcpSocket::connected, this, [this, host, port]() {
+            postLog(QString("[Video] Connected to %1:%2").arg(host).arg(port));
+        });
+        connect(socket_, &QTcpSocket::disconnected, this, [this]() {
+            recv_buf_.clear();
+            expected_size_ = 0;
+            postLog("[Video] Disconnected.");
+        });
+        connect(socket_,
+                QOverload<QAbstractSocket::SocketError>::of(&QTcpSocket::errorOccurred),
+                this,
+                [this](QAbstractSocket::SocketError err) {
+                    if (socket_ == nullptr) return;
+                    postLog(QString("[Video] Socket error (%1): %2")
+                                .arg(static_cast<int>(err))
+                                .arg(socket_->errorString()));
+                });
+        connect(socket_, &QTcpSocket::readyRead, this, [this]() {
+            onReadyRead();
+        });
+
+        socket_->connectToHost(host, port);
+    }
+
+    void stopStream()
+    {
+        if (socket_ == nullptr) {
+            recv_buf_.clear();
+            expected_size_ = 0;
+            return;
+        }
+
+        disconnect(socket_, nullptr, this, nullptr);
+        socket_->abort();
+        socket_->deleteLater();
+        socket_ = nullptr;
+        recv_buf_.clear();
+        expected_size_ = 0;
+    }
+
+private:
+    void onReadyRead()
+    {
+        if (socket_ == nullptr) return;
+
+        recv_buf_.append(socket_->readAll());
+
+        while (true) {
+            if (expected_size_ == 0) {
+                if (recv_buf_.size() < 4) break;
+
+                quint32 be = 0;
+                memcpy(&be, recv_buf_.constData(), 4);
+                expected_size_ = qFromBigEndian(be);
+                recv_buf_.remove(0, 4);
+
+                if (expected_size_ == 0 || expected_size_ > 10 * 1024 * 1024) {
+                    expected_size_ = 0;
+                    recv_buf_.clear();
+                    postLog("[Video] Invalid frame header, dropping buffer.");
+                    break;
+                }
+            }
+
+            if (static_cast<quint32>(recv_buf_.size()) < expected_size_) {
+                break;
+            }
+
+            QByteArray jpeg = recv_buf_.left(static_cast<int>(expected_size_));
+            recv_buf_.remove(0, static_cast<int>(expected_size_));
+            expected_size_ = 0;
+
+            QImage img;
+            if (!img.loadFromData(jpeg, "JPEG")) {
+                postLog("[Video] JPEG decode failed.");
+                continue;
+            }
+
+            const QImage ready = img;
+            QMetaObject::invokeMethod(owner_,
+                                      [owner = owner_, ready]() {
+                                          emit owner->frameReady(ready);
+                                      },
+                                      Qt::QueuedConnection);
+
+            ++frame_count_;
+            const qint64 elapsed = fps_timer_.elapsed();
+            if (elapsed >= 1000) {
+                const double fps = frame_count_ * 1000.0 / elapsed;
+                QMetaObject::invokeMethod(owner_,
+                                          [owner = owner_, fps]() {
+                                              emit owner->fpsUpdated(fps);
+                                              emit owner->logMessage(
+                                                  QString("[Video] Receiving frames: %1 fps")
+                                                      .arg(fps, 0, 'f', 1));
+                                          },
+                                          Qt::QueuedConnection);
+                frame_count_ = 0;
+                fps_timer_.restart();
+            }
+        }
+    }
+
+    void postLog(const QString &msg)
+    {
+        QMetaObject::invokeMethod(owner_,
+                                  [owner = owner_, msg]() {
+                                      emit owner->logMessage(msg);
+                                  },
+                                  Qt::QueuedConnection);
+    }
+
+    VideoClient *owner_{nullptr};
+    QTcpSocket  *socket_{nullptr};
+    QByteArray   recv_buf_;
+    quint32      expected_size_{0};
+    int          frame_count_{0};
+    QElapsedTimer fps_timer_;
+};
+
 VideoClient::VideoClient(QObject *parent)
     : QObject(parent)
-    , socket_(new QTcpSocket(this))
 {
-    connect(socket_, &QTcpSocket::connected,    this, &VideoClient::onConnected);
-    connect(socket_, &QTcpSocket::disconnected, this, &VideoClient::onDisconnected);
-    connect(socket_, &QTcpSocket::readyRead,    this, &VideoClient::onReadyRead);
-    connect(socket_, QOverload<QAbstractSocket::SocketError>::of(&QTcpSocket::error),
-            this, &VideoClient::onError);
-    fps_timer_.start();
+    worker_thread_ = new QThread(this);
+    worker_ = new VideoWorker(this);
+    worker_->moveToThread(worker_thread_);
+    connect(worker_thread_, &QThread::finished, worker_, &QObject::deleteLater);
+    worker_thread_->start();
+}
+
+VideoClient::~VideoClient()
+{
+    disconnectFromHost();
+    if (worker_thread_ != nullptr) {
+        worker_thread_->quit();
+        worker_thread_->wait(2000);
+    }
 }
 
 void VideoClient::setHost(const QString &host, quint16 port)
@@ -25,106 +172,32 @@ void VideoClient::setHost(const QString &host, quint16 port)
 
 void VideoClient::connectToHost()
 {
-    if (socket_->state() != QAbstractSocket::UnconnectedState) {
-        socket_->disconnectFromHost();
-    }
-    recv_buf_.clear();
-    expected_size_ = 0;
-    frame_count_   = 0;
-    fps_timer_.restart();
-    emit logMessage(QString("[Video] Connecting to %1:%2 ...").arg(host_).arg(port_));
+    stopRelay();
+    if (worker_ == nullptr) return;
 
-    QString connectHost = host_;
-    quint16 connectPort = port_;
-    if (host_ != "127.0.0.1" && host_ != "localhost") {
-        if (!ensureRelay()) {
-            emit logMessage("[Video] Failed to start local relay");
-            return;
-        }
-        connectHost = "127.0.0.1";
-        connectPort = relay_listen_port_;
-        emit logMessage(QString("[Video] Using local relay %1:%2 -> %3:%4")
-                        .arg(connectHost)
-                        .arg(connectPort)
-                        .arg(host_)
-                        .arg(port_));
-    } else {
-        stopRelay();
-    }
-
-    socket_->connectToHost(connectHost, connectPort);
+    const QString host = host_;
+    const quint16 port = port_;
+    QMetaObject::invokeMethod(worker_,
+                              [this, host, port]() {
+                                  if (worker_ != nullptr) {
+                                      worker_->startStream(host, port);
+                                  }
+                              },
+                              Qt::QueuedConnection);
 }
 
 void VideoClient::disconnectFromHost()
 {
-    socket_->disconnectFromHost();
-    stopRelay();
-}
-
-void VideoClient::onConnected()
-{
-    emit logMessage(QString("[Video] Connected to %1:%2").arg(host_).arg(port_));
-}
-
-void VideoClient::onDisconnected()
-{
-    recv_buf_.clear();
-    expected_size_ = 0;
-    emit logMessage("[Video] Disconnected.");
-}
-
-void VideoClient::onError(QAbstractSocket::SocketError err)
-{
-    emit logMessage(QString("[Video] Socket error (%1): %2")
-                    .arg(static_cast<int>(err))
-                    .arg(socket_->errorString()));
-}
-
-void VideoClient::onReadyRead()
-{
-    recv_buf_.append(socket_->readAll());
-
-    while (true) {
-        if (expected_size_ == 0) {
-            // Need 4-byte header
-            if (recv_buf_.size() < 4) break;
-
-            quint32 be;
-            memcpy(&be, recv_buf_.constData(), 4);
-            expected_size_ = qFromBigEndian(be);
-            recv_buf_.remove(0, 4);
-
-            if (expected_size_ == 0 || expected_size_ > 10 * 1024 * 1024) {
-                // Sanity check: reject absurd sizes
-                expected_size_ = 0;
-                recv_buf_.clear();
-                break;
-            }
-        }
-
-        if ((quint32)recv_buf_.size() < expected_size_) {
-            break; // Wait for more data
-        }
-
-        QByteArray jpeg = recv_buf_.left(static_cast<int>(expected_size_));
-        recv_buf_.remove(0, static_cast<int>(expected_size_));
-        expected_size_ = 0;
-
-        QImage img;
-        if (img.loadFromData(jpeg, "JPEG")) {
-            emit frameReady(img);
-
-            ++frame_count_;
-            qint64 elapsed = fps_timer_.elapsed();
-            if (elapsed >= 1000) {
-                double fps = frame_count_ * 1000.0 / elapsed;
-                emit fpsUpdated(fps);
-                emit logMessage(QString("[Video] Receiving frames: %1 fps").arg(fps, 0, 'f', 1));
-                frame_count_ = 0;
-                fps_timer_.restart();
-            }
-        }
+    if (worker_ != nullptr) {
+        QMetaObject::invokeMethod(worker_,
+                                  [this]() {
+                                      if (worker_ != nullptr) {
+                                          worker_->stopStream();
+                                      }
+                                  },
+                                  Qt::QueuedConnection);
     }
+    stopRelay();
 }
 
 bool VideoClient::ensureRelay()

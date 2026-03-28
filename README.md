@@ -64,6 +64,30 @@ build/bin/HostGUI
 
 启动后可在主界面中设置目标主机与端口，连接机器人控制端与视频流服务。
 
+## Ubuntu 自动安装脚本
+
+如果未来需要把 `HostGUI` 部署到用户的 Ubuntu 主机上，可以直接使用脚本自动检测并安装依赖。
+
+仅安装运行依赖：
+
+```bash
+./tools/install_ubuntu_deps.sh
+```
+
+安装运行依赖和编译依赖：
+
+```bash
+./tools/install_ubuntu_deps.sh --with-build-deps
+```
+
+安装依赖并直接编译：
+
+```bash
+./tools/install_ubuntu_deps.sh --with-build-deps --build
+```
+
+该脚本当前主要面向 Ubuntu `20.04` 和 `22.04`。
+
 ## 清理构建产物
 
 ```bash
