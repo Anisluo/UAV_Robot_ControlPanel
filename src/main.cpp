@@ -1,12 +1,24 @@
 #include <QApplication>
 #include <QNetworkProxy>
 #include <QIcon>
+#include <QtGlobal>
 #include "gui/MainWindow.h"
 #include "gui/AppIcon.h"
 #include "gui/StyleSheet.h"
 
 int main(int argc, char *argv[])
 {
+#if defined(Q_OS_LINUX)
+    // CentOS/RHEL desktop sessions are commonly X11-based. When no explicit Qt
+    // platform is configured and a DISPLAY is present, prefer xcb to avoid
+    // platform plugin ambiguity between Wayland and X11.
+    if (qEnvironmentVariableIsEmpty("QT_QPA_PLATFORM") &&
+        qEnvironmentVariableIsEmpty("WAYLAND_DISPLAY") &&
+        !qEnvironmentVariableIsEmpty("DISPLAY")) {
+        qputenv("QT_QPA_PLATFORM", "xcb");
+    }
+#endif
+
     QApplication app(argc, argv);
 
     // Disable system proxy: Qt picks up HTTP_PROXY env vars by default,

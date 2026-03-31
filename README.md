@@ -24,16 +24,23 @@ HostGUI/
 
 ## 环境依赖
 
-- Ubuntu / Linux
+- Ubuntu / CentOS / Linux
 - `g++`，支持 C++17
 - `pkg-config`
 - `Qt5Widgets`
 - `Qt5Network`
 
-可使用以下命令安装基础依赖：
+可使用以下命令自动识别发行版并安装编译依赖：
 
 ```bash
 make install-deps
+```
+
+也可以显式选择脚本：
+
+```bash
+./tools/install_ubuntu_deps.sh --with-build-deps
+./tools/install_centos_deps.sh --with-build-deps
 ```
 
 ## 编译
@@ -64,29 +71,80 @@ build/bin/HostGUI
 
 启动后可在主界面中设置目标主机与端口，连接机器人控制端与视频流服务。
 
-## Ubuntu 自动安装脚本
+## Linux 自动安装脚本
 
-如果未来需要把 `HostGUI` 部署到用户的 Ubuntu 主机上，可以直接使用脚本自动检测并安装依赖。
+如果需要把 `HostGUI` 部署到 Ubuntu 或 CentOS / RHEL 主机上，可以直接使用脚本自动检测并安装依赖。
 
-仅安装运行依赖：
+Ubuntu 仅安装运行依赖：
 
 ```bash
 ./tools/install_ubuntu_deps.sh
 ```
 
-安装运行依赖和编译依赖：
+Ubuntu 安装运行依赖和编译依赖：
 
 ```bash
 ./tools/install_ubuntu_deps.sh --with-build-deps
 ```
 
-安装依赖并直接编译：
+Ubuntu 安装依赖并直接编译：
 
 ```bash
 ./tools/install_ubuntu_deps.sh --with-build-deps --build
 ```
 
-该脚本当前主要面向 Ubuntu `20.04` 和 `22.04`。
+CentOS / RHEL 仅安装运行依赖：
+
+```bash
+./tools/install_centos_deps.sh
+```
+
+CentOS / RHEL 安装运行依赖和编译依赖：
+
+```bash
+./tools/install_centos_deps.sh --with-build-deps
+```
+
+CentOS / RHEL 安装依赖并直接编译：
+
+```bash
+./tools/install_centos_deps.sh --with-build-deps --build
+```
+
+其中 CentOS / RHEL 脚本主要面向 8.x 系列环境，常见内核版本为 `4.18`。
+
+## 客户发布包
+
+如果需要发给客户一个“不含源码”的运行包，可以执行：
+
+```bash
+./tools/package_release.sh
+```
+
+生成目录：
+
+```text
+dist/HostGUI_release/
+```
+
+该目录默认包含：
+
+- `HostGUI`
+- `install_ubuntu_deps.sh`
+- `install_centos_deps.sh`
+- `README_客户版.md`
+
+客户拿到后只需要执行：
+
+```bash
+# Ubuntu
+./install_ubuntu_deps.sh
+
+# CentOS / RHEL
+./install_centos_deps.sh
+
+./HostGUI
+```
 
 ## 清理构建产物
 

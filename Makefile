@@ -1,5 +1,14 @@
 CXX ?= g++
-MOC ?= $(shell pkg-config --variable=host_bins Qt5Core)/moc
+
+QT_HOST_BINS := $(shell pkg-config --variable=host_bins Qt5Core 2>/dev/null)
+MOC_CANDIDATES := $(strip \
+	$(if $(QT_HOST_BINS),$(QT_HOST_BINS)/moc) \
+	$(if $(QT_HOST_BINS),$(QT_HOST_BINS)/moc-qt5) \
+	$(shell command -v moc 2>/dev/null) \
+	$(shell command -v moc-qt5 2>/dev/null) \
+	/usr/lib64/qt5/bin/moc \
+	/usr/lib/qt5/bin/moc)
+MOC ?= $(firstword $(MOC_CANDIDATES))
 
 QT_CFLAGS := $(shell pkg-config --cflags Qt5Widgets Qt5Network)
 QT_LIBS   := $(shell pkg-config --libs   Qt5Widgets Qt5Network)
@@ -29,7 +38,7 @@ moc_obj = $(OBJ_DIR)/moc/moc_$(notdir $(basename $(1))).o
 MOC_OBJS = $(foreach h,$(MOC_HDRS),$(call moc_obj,$(h)))
 
 # ── Default goal must come before foreach/eval to avoid being displaced ────
-.PHONY: all clean install-deps
+.PHONY: all clean install-deps install-deps-ubuntu install-deps-centos
 all: $(TARGET)
 
 # ── Per-header moc rules (generation + compilation, fully explicit) ────────
@@ -56,7 +65,13 @@ $(OBJ_DIR)/%.o: src/%.cpp
 
 # ── Install Qt5 dev packages (Ubuntu) ─────────────────────────────────────
 install-deps:
-	sudo apt-get update && sudo apt-get install -y qtbase5-dev pkg-config
+	./tools/install_linux_deps.sh --with-build-deps
+
+install-deps-ubuntu:
+	./tools/install_ubuntu_deps.sh --with-build-deps
+
+install-deps-centos:
+	./tools/install_centos_deps.sh --with-build-deps
 
 # ── Auto-generated header dependencies ────────────────────────────────────
 DEPS := $(OBJS:.o=.d)

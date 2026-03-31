@@ -45,10 +45,10 @@ QString Tab3Help::helpHtml()
         "<h1>无人机机器人控制台 &ndash; 帮助文档</h1>"
 
         "<h2>系统架构</h2>"
-        "<p>HostGUI 运行于 Ubuntu 工作站，与基于 RK3588 的机器人控制器<em>仅</em>通过 TCP/IP 通信。"
+        "<p>HostGUI 运行于 Linux 工作站（Ubuntu / CentOS），与基于 RK3588 的机器人控制器<em>仅</em>通过 TCP/IP 通信。"
         "主机与机器人之间不存在 USB、串口或 CAN 直接连接，所有子系统控制均通过 RK3588 转发。</p>"
         "<pre>"
-        "  [ Ubuntu HostGUI ] &lt;--- TCP 7001 (JSON-RPC) ---&gt; [ RK3588 机器人控制器 ]\n"
+        "  [ Linux HostGUI ]  &lt;--- TCP 7001 (JSON-RPC) ---&gt; [ RK3588 机器人控制器 ]\n"
         "                     &lt;--- TCP 7002 (MJPEG)    ---&gt;\n"
         "\n"
         "  RK3588 内部控制:\n"

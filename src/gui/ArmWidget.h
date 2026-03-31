@@ -18,6 +18,8 @@ public:
 private slots:
     void onSet();
     void onHome();
+    void onHomeAxis();
+    void onMoveAxis();
     void onEnable();
     void onDisable();
     void onEstop();
@@ -26,13 +28,15 @@ private slots:
 private:
     void buildUi();
     void setCurrentAngleValue(int axis, double degrees);
+    void setPerAxisButtonsEnabled(bool enabled);
 
     RpcClient *rpc_;
 
-    // Per-axis: target angle spinbox, current angle label, home-safe-pos spinbox
+    // Per-axis widgets
     QList<QDoubleSpinBox*> target_spins_;
     QList<QLabel*>         current_labels_;
-    QList<QDoubleSpinBox*> safe_spins_;
+    QList<QPushButton*>    axis_home_buttons_;
+    QList<QPushButton*>    axis_move_buttons_;
 
     QTimer *poll_timer_;
     bool    angle_request_in_flight_{false};
