@@ -1,4 +1,5 @@
 #include "MeshPinger.h"
+#include "PlatformUtils.h"
 
 #include <QProcess>
 #include <QTimer>
@@ -79,6 +80,6 @@ void MeshPinger::onTimer()
                     }
                 });
 
-        proc->start("ping", {"-c", "1", "-W", "1", ip});
+        proc->start(QStringLiteral("ping"), PlatformUtils::singlePingArguments(ip));
     }
 }

@@ -1,4 +1,5 @@
 #include "RpcClient.h"
+#include "PlatformUtils.h"
 
 #include <QTcpSocket>
 #include <QJsonDocument>
@@ -225,11 +226,16 @@ while True:
     threading.Thread(target=pump, args=(server, client), daemon=True).start()
 )PY";
 
-    QStringList args;
-    args << "-u" << "-c" << kRelayScript << host_ << QString::number(port_);
-    proc->start("python3", args);
+    const auto launchSpec = PlatformUtils::pythonCommand({
+        QStringLiteral("-u"),
+        QStringLiteral("-c"),
+        QString::fromUtf8(kRelayScript),
+        host_,
+        QString::number(port_)
+    });
+    proc->start(launchSpec.program, launchSpec.arguments);
     if (!proc->waitForStarted(3000)) {
-        emit logMessage("[RPC relay] python3 relay failed to start");
+        emit logMessage("[RPC relay] Python relay failed to start");
         stopRelay();
         return false;
     }

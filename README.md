@@ -1,158 +1,129 @@
 # UAV_Robot Control Panel
 
-`HostGUI` 是一个基于 Qt5 的上位机控制终端，用于连接无人机/机器人平台，完成 RPC 控制、视频显示和多模块状态监控。
+`HostGUI` 是一个基于 Qt 的上位机控制界面，用于连接无人机/机器人平台，完成 RPC 控制、视频显示、任务配置和状态监控。
 
-## 功能概览
+## 当前状态
 
-- 主控面板，集中展示连接状态、视频画面和日志输出
-- RPC 通信客户端，用于向机器人侧发送控制指令
-- 视频客户端，用于接收实时视频流并显示帧率
-- 子系统控制组件，包括机械臂、UGV、机场、夹爪、网格地图和无人机模块
-- 接口配置页和帮助页，便于调试与联调
+项目最初主要按 Linux 环境组织，仓库内保留了原有 `Makefile` 和 Linux 安装脚本。
+
+现在仓库已经补充了 Windows 适配所需的关键改动：
+
+- 新增 `CMakeLists.txt`，可用于 Windows 上通过 CMake 构建
+- `MeshPinger` 已适配 Windows 和 Linux 不同的 `ping` 参数
+- Python 中继进程已兼容 `python3`、`python`、`py` 三种常见启动方式
+- 保留 Linux 构建方式，不影响原有使用流程
 
 ## 目录结构
 
 ```text
-HostGUI/
-├── Makefile
-├── src/
-│   ├── core/     # RPC / Video / Protocol
-│   ├── gui/      # 主窗口与各功能组件
-│   └── main.cpp  # 程序入口
-└── build/        # 编译输出目录（默认不纳入版本管理）
+UAV_Robot_ControlPanel/
+|- CMakeLists.txt
+|- Makefile
+|- src/
+|  |- core/
+|  |- gui/
+|  `- main.cpp
+|- tools/
+`- dist/
 ```
 
-## 环境依赖
+## 依赖
 
-- Ubuntu / CentOS / Linux
+### Linux
+
 - `g++`，支持 C++17
 - `pkg-config`
-- `Qt5Widgets`
-- `Qt5Network`
+- Qt5 Widgets / Network 开发包
 
-可使用以下命令自动识别发行版并安装编译依赖：
+### Windows
 
-```bash
-make install-deps
-```
+- CMake 3.16+
+- Qt 5 或 Qt 6
+- 一套可用的 C++ 编译器
+  - 推荐 Visual Studio 2022
+  - 或 MinGW-w64
 
-也可以显式选择脚本：
+## Linux 构建
 
-```bash
-./tools/install_ubuntu_deps.sh --with-build-deps
-./tools/install_centos_deps.sh --with-build-deps
-```
-
-## 编译
-
-在 `HostGUI` 目录下执行：
+在项目根目录执行：
 
 ```bash
 make
 ```
 
-编译完成后，程序输出到：
+输出文件：
 
-```bash
+```text
 build/bin/HostGUI
+```
+
+## Windows 构建
+
+推荐使用 “x64 Native Tools Command Prompt for VS 2022” 或已配置好 Qt/CMake 的 PowerShell。
+
+### 1. 配置工程
+
+Qt 6 示例：
+
+```powershell
+cmake -S . -B build-windows -G "Visual Studio 17 2022" -A x64 -DCMAKE_PREFIX_PATH="C:\Qt\6.6.3\msvc2019_64"
+```
+
+Qt 5 示例：
+
+```powershell
+cmake -S . -B build-windows -G "Visual Studio 17 2022" -A x64 -DCMAKE_PREFIX_PATH="C:\Qt\5.15.2\msvc2019_64"
+```
+
+如果你使用 MinGW，可以改成对应的生成器和 Qt MinGW 套件路径。
+
+### 2. 编译
+
+```powershell
+cmake --build build-windows --config Release
+```
+
+可执行文件通常位于：
+
+```text
+build-windows\Release\HostGUI.exe
+```
+
+### 3. 部署 Qt 运行库
+
+如果系统中可找到 `windeployqt`，仓库里的 CMake 目标会自动提供 `deploy_windows`：
+
+```powershell
+cmake --build build-windows --config Release --target deploy_windows
+```
+
+如果没有这个目标，也可以手动执行：
+
+```powershell
+windeployqt build-windows\Release\HostGUI.exe
 ```
 
 ## 运行
 
-```bash
-./build/bin/HostGUI
-```
+程序默认使用：
 
-程序默认提供：
+- 主机地址：`192.168.1.101`
+- RPC 端口：`7001`
+- 视频端口：`7002`
 
-- 主机地址：`192.168.10.2`
-- RPC 端口：来自 `Protocol::RPC_PORT`
-- 视频端口：来自 `Protocol::VIDEO_PORT`
+启动后可以在主界面中修改地址和端口。
 
-启动后可在主界面中设置目标主机与端口，连接机器人控制端与视频流服务。
+## 已知说明
 
-## Linux 自动安装脚本
+- `MeshPinger` 在 Windows 上依赖系统自带的 `ping.exe`
+- 中继逻辑依赖本机存在可调用的 Python 解释器
+- 当前机器如果没有安装 Qt / CMake / 编译器，将无法直接本地编译
+- 仓库中部分界面文案仍存在历史编码问题，不影响这次 Windows 构建链适配，但后续建议统一转成 UTF-8
 
-如果需要把 `HostGUI` 部署到 Ubuntu 或 CentOS / RHEL 主机上，可以直接使用脚本自动检测并安装依赖。
+## Linux 发布脚本
 
-Ubuntu 仅安装运行依赖：
-
-```bash
-./tools/install_ubuntu_deps.sh
-```
-
-Ubuntu 安装运行依赖和编译依赖：
-
-```bash
-./tools/install_ubuntu_deps.sh --with-build-deps
-```
-
-Ubuntu 安装依赖并直接编译：
-
-```bash
-./tools/install_ubuntu_deps.sh --with-build-deps --build
-```
-
-CentOS / RHEL 仅安装运行依赖：
-
-```bash
-./tools/install_centos_deps.sh
-```
-
-CentOS / RHEL 安装运行依赖和编译依赖：
-
-```bash
-./tools/install_centos_deps.sh --with-build-deps
-```
-
-CentOS / RHEL 安装依赖并直接编译：
-
-```bash
-./tools/install_centos_deps.sh --with-build-deps --build
-```
-
-其中 CentOS / RHEL 脚本主要面向 8.x 系列环境，常见内核版本为 `4.18`。
-
-## 客户发布包
-
-如果需要发给客户一个“不含源码”的运行包，可以执行：
+如果需要打 Linux 客户发布包，仍可使用：
 
 ```bash
 ./tools/package_release.sh
 ```
-
-生成目录：
-
-```text
-dist/HostGUI_release/
-```
-
-该目录默认包含：
-
-- `HostGUI`
-- `install_ubuntu_deps.sh`
-- `install_centos_deps.sh`
-- `README_客户版.md`
-
-客户拿到后只需要执行：
-
-```bash
-# Ubuntu
-./install_ubuntu_deps.sh
-
-# CentOS / RHEL
-./install_centos_deps.sh
-
-./HostGUI
-```
-
-## 清理构建产物
-
-```bash
-make clean
-```
-
-## 说明
-
-- 当前仓库仅包含上位机 GUI 部分
-- `build/` 目录下的二进制和中间产物已通过 `.gitignore` 排除
