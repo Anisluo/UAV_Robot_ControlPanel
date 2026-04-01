@@ -1,5 +1,8 @@
 build/
 build-*/
+build_win/
+dist/HostGUI_Windows/
+dist/*.zip
 CMakeFiles/
 CMakeCache.txt
 cmake_install.cmake
