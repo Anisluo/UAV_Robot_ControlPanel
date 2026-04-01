@@ -3,6 +3,7 @@
 
 #include <QTcpSocket>
 #include <QAbstractSocket>
+#include <QElapsedTimer>
 #include <QMetaObject>
 #include <QThread>
 #include <QtEndian>
