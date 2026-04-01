@@ -138,22 +138,6 @@ void ArmWidget::buildUi()
     connect(btn_home_,    &QPushButton::clicked, this, &ArmWidget::onHome);
 }
 
-// Send target angles to arm
-void ArmWidget::onSet()
-{
-    if (!rpc_ || !rpc_->isConnected()) return;
-    QJsonArray joints;
-    for (int i = 0; i < 6; ++i)
-        joints.append(target_spins_[i]->value());
-    QJsonObject params;
-    params[Protocol::Fields::JOINTS] = joints;
-    rpc_->call(Protocol::Methods::ARM_SET_JOINTS, params,
-               [this](QJsonObject result) {
-        const bool ok = result.value("ok").toBool(false);
-        status_label_->setText(ok ? "设置完成" : "设置失败: " + result.value("error").toString());
-    });
-}
-
 // Sequential home: each axis homes then moves to its safe position
 void ArmWidget::onHome()
 {

@@ -42,7 +42,6 @@ private slots:
     void onRpcDisconnected();
     void onFpsUpdated(double fps);
     void onLogMessage(const QString &msg);
-    void onPingResult();
     void onVideoEnabledToggled(bool checked);
 
 private:

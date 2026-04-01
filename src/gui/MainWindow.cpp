@@ -298,21 +298,6 @@ void MainWindow::onLogMessage(const QString &msg)
     log_widget_->appendLogMsg(msg);
 }
 
-void MainWindow::onPingResult()
-{
-    log_widget_->appendLog("INFO", "[系统] Ping 成功 - 机器人在线。");
-    if (video_enable_radio_ && video_enable_radio_->isChecked()) {
-        QJsonObject params;
-        params[Protocol::Fields::ENABLED] = true;
-        rpc_client_->call(Protocol::Methods::VIDEO_SET_ENABLED, params,
-            [this](QJsonObject) {
-                if (video_enable_radio_ && video_enable_radio_->isChecked()) {
-                    video_client_->connectToHost();
-                }
-            });
-    }
-}
-
 void MainWindow::setLedColor(const QString &color)
 {
     led_label_->setStyleSheet(

@@ -174,7 +174,7 @@ void UGVWidget::onOmegaSliderChanged(int value)
 void UGVWidget::onOmegaSpinChanged(double value)
 {
     bool blocked = omega_slider_->blockSignals(true);
-    omega_slider_->setValue(static_cast<int>(value * 100));
+    omega_slider_->setValue(static_cast<int>(value * OMEGA_SCALE));
     omega_slider_->blockSignals(blocked);
 }
 
@@ -192,24 +192,6 @@ void UGVWidget::sendVelocity(double vx, double omega)
 void UGVWidget::sendVelocity()
 {
     sendVelocity(vx_spin_->value(), omega_spin_->value());
-}
-
-void UGVWidget::resetInputs()
-{
-    bool b1 = vx_slider_->blockSignals(true);
-    bool b2 = vx_spin_->blockSignals(true);
-    bool b3 = omega_slider_->blockSignals(true);
-    bool b4 = omega_spin_->blockSignals(true);
-
-    vx_slider_->setValue(0);
-    vx_spin_->setValue(0.0);
-    omega_slider_->setValue(0);
-    omega_spin_->setValue(0.0);
-
-    vx_slider_->blockSignals(b1);
-    vx_spin_->blockSignals(b2);
-    omega_slider_->blockSignals(b3);
-    omega_spin_->blockSignals(b4);
 }
 
 void UGVWidget::applyVxLimit(double limit_abs)
@@ -230,14 +212,6 @@ void UGVWidget::applyVxLimit(double limit_abs)
 
     vx_slider_->blockSignals(b1);
     vx_spin_->blockSignals(b2);
-}
-
-double UGVWidget::currentVxLimit() const
-{
-    if (vx_limit_radio_ && vx_limit_radio_->isChecked()) {
-        return vx_limit_spin_->value();
-    }
-    return DEFAULT_VX_LIMIT;
 }
 
 void UGVWidget::onStop()

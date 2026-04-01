@@ -16,7 +16,6 @@ public:
     explicit ArmWidget(RpcClient *rpc, QWidget *parent = nullptr);
 
 private slots:
-    void onSet();
     void onHome();
     void onHomeAxis();
     void onMoveAxis();
@@ -43,7 +42,6 @@ private:
 
     QPushButton *btn_enable_;
     QPushButton *btn_disable_;
-    QPushButton *btn_set_;
     QPushButton *btn_estop_;
     QPushButton *btn_home_;
     QLabel      *status_label_;

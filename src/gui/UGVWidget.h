@@ -28,9 +28,7 @@ private slots:
 private:
     void buildUi();
     void sendVelocity(double vx, double omega);
-    void resetInputs();
     void applyVxLimit(double limit_abs);
-    double currentVxLimit() const;
 
     RpcClient      *rpc_;
 

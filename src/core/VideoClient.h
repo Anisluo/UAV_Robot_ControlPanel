@@ -3,10 +3,7 @@
 
 #include <QObject>
 #include <QString>
-#include <QByteArray>
 #include <QImage>
-#include <QElapsedTimer>
-#include <QAbstractSocket>
 #include <QProcess>
 #include <QThread>
 
