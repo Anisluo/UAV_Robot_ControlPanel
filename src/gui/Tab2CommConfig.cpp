@@ -14,6 +14,7 @@
 #include <QScrollArea>
 #include <QFrame>
 #include <QJsonObject>
+#include <QSettings>
 #include <QString>
 
 Tab2CommConfig::Tab2CommConfig(RpcClient *rpc, QWidget *parent)
@@ -237,4 +238,41 @@ void Tab2CommConfig::onApplyEthernet()
     params[Protocol::Fields::RPC_PORT_F]  = eth_rpc_port_spin_->value();
     params[Protocol::Fields::VIDEO_PORT_F] = eth_video_port_spin_->value();
     rpc_->call(Protocol::Methods::CONFIG_SET_ETHERNET, params);
+}
+
+void Tab2CommConfig::loadConfig(QSettings &s)
+{
+    s.beginGroup("Tab2CommConfig");
+    can1_bitrate_spin_->setValue(s.value("can1_bitrate", can1_bitrate_spin_->value()).toInt());
+    can3_bitrate_spin_->setValue(s.value("can3_bitrate", can3_bitrate_spin_->value()).toInt());
+    can4_bitrate_spin_->setValue(s.value("can4_bitrate", can4_bitrate_spin_->value()).toInt());
+    serial_device_edit_->setText(s.value("serial_device", serial_device_edit_->text()).toString());
+    {
+        const QString baud = s.value("serial_baud", serial_baud_combo_->currentText()).toString();
+        const int idx = serial_baud_combo_->findText(baud);
+        if (idx >= 0) serial_baud_combo_->setCurrentIndex(idx);
+    }
+    relay_gpio_spin_->setValue(s.value("relay_gpio", relay_gpio_spin_->value()).toInt());
+    relay_active_combo_->setCurrentIndex(
+        s.value("relay_active_idx", relay_active_combo_->currentIndex()).toInt());
+    eth_host_edit_->setText(s.value("eth_host", eth_host_edit_->text()).toString());
+    eth_rpc_port_spin_->setValue(s.value("eth_rpc_port", eth_rpc_port_spin_->value()).toInt());
+    eth_video_port_spin_->setValue(s.value("eth_video_port", eth_video_port_spin_->value()).toInt());
+    s.endGroup();
+}
+
+void Tab2CommConfig::saveConfig(QSettings &s) const
+{
+    s.beginGroup("Tab2CommConfig");
+    s.setValue("can1_bitrate", can1_bitrate_spin_->value());
+    s.setValue("can3_bitrate", can3_bitrate_spin_->value());
+    s.setValue("can4_bitrate", can4_bitrate_spin_->value());
+    s.setValue("serial_device", serial_device_edit_->text());
+    s.setValue("serial_baud", serial_baud_combo_->currentText());
+    s.setValue("relay_gpio", relay_gpio_spin_->value());
+    s.setValue("relay_active_idx", relay_active_combo_->currentIndex());
+    s.setValue("eth_host", eth_host_edit_->text());
+    s.setValue("eth_rpc_port", eth_rpc_port_spin_->value());
+    s.setValue("eth_video_port", eth_video_port_spin_->value());
+    s.endGroup();
 }

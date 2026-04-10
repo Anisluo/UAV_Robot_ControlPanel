@@ -7,11 +7,14 @@
 class QPlainTextEdit;
 class QComboBox;
 class QPushButton;
+class QTimer;
+class RpcClient;
 
 class LogWidget : public QWidget {
     Q_OBJECT
 public:
-    explicit LogWidget(QWidget *parent = nullptr);
+    // rpc may be null; remote sources will be disabled in that case.
+    explicit LogWidget(RpcClient *rpc = nullptr, QWidget *parent = nullptr);
 
 public slots:
     void appendLog(const QString &level, const QString &msg);
@@ -20,14 +23,22 @@ public slots:
 
 private slots:
     void clearLog();
+    void onSourceChanged(int index);
+    void pollRemoteLogs();
 
 private:
     QPlainTextEdit *log_edit_;
     QComboBox      *filter_combo_;
+    QComboBox      *source_combo_;
     QPushButton    *clear_btn_;
+    QTimer         *poll_timer_ = nullptr;
+    RpcClient      *rpc_        = nullptr;
+    QString         last_remote_logs_;
+    bool            in_remote_mode_ = false;
 
     QString colorForLevel(const QString &level) const;
     bool    levelPassesFilter(const QString &level) const;
+    void    renderRemoteLogs(const QString &text);
 };
 
 #endif // LOGWIDGET_H

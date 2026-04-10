@@ -29,11 +29,16 @@ class QRadioButton;
 class QStatusBar;
 class QSplitter;
 
+class QCloseEvent;
+
 class MainWindow : public QMainWindow {
     Q_OBJECT
 public:
     explicit MainWindow(QWidget *parent = nullptr);
     ~MainWindow();
+
+protected:
+    void closeEvent(QCloseEvent *event) override;
 
 private slots:
     void onConnect();
@@ -49,6 +54,10 @@ private:
     QWidget* buildDashboardTab();
     QWidget* buildConnectionGroup();
     void setLedColor(const QString &color);
+
+    // Persist / restore UI parameters via QSettings (INI file).
+    void loadConfig();
+    void saveConfig() const;
 
     // Core clients
     RpcClient    *rpc_client_;

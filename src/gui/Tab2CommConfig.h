@@ -8,6 +8,7 @@ class QLineEdit;
 class QComboBox;
 class QSpinBox;
 class QPushButton;
+class QSettings;
 
 class Tab2CommConfig : public QWidget {
     Q_OBJECT
@@ -16,6 +17,10 @@ public:
 
     // Called by MainWindow when connection params change
     void setConnectionParams(const QString &host, quint16 rpcPort, quint16 videoPort);
+
+    // Persist / restore all interface-config UI fields.
+    void loadConfig(QSettings &s);
+    void saveConfig(QSettings &s) const;
 
 private slots:
     void onApplyCan1();

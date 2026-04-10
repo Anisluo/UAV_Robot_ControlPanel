@@ -13,6 +13,7 @@
 #include <QListWidgetItem>
 #include <QJsonObject>
 #include <QFrame>
+#include <QTimer>
 
 Tab4TaskConfig::Tab4TaskConfig(RpcClient *rpc, QWidget *parent)
     : QWidget(parent)
@@ -39,7 +40,7 @@ void Tab4TaskConfig::buildUi()
     outerLayout->addWidget(mainSplitter, 3);
 
     // ── Bottom: log ───────────────────────────────────────────────────────
-    log_widget_ = new LogWidget(this);
+    log_widget_ = new LogWidget(rpc_, this);
     log_widget_->setMinimumHeight(120);
     outerLayout->addWidget(log_widget_, 1);
 }
@@ -94,15 +95,15 @@ QWidget* Tab4TaskConfig::buildTaskPanel()
         item->setSizeHint(QSize(0, 48));
     };
 
-    addTask("电池拾取任务",  "识别方形电池 → 机械臂夹取 → 放入电池槽", "battery_pick");
-    addTask("机械臂回零",    "六轴机械臂回零位",                        "arm_home");
-    addTask("平台锁定",      "锁定承载平台",                             "platform_lock");
-    addTask("相机标定",      "执行相机内参标定流程",                     "camera_calib");
+    addTask("机械臂演示运动", "单轴往复运动 (用于验证任务调度链路)",      "arm_demo");
+    addTask("机械臂回零",     "六轴机械臂回零位",                          "arm_home");
+    addTask("电池拾取任务",   "识别方形电池 → 机械臂夹取 → 放入电池槽",    "battery_pick");
+    addTask("平台锁定",       "锁定承载平台",                              "platform_lock");
 
     task_list_->setCurrentRow(0);
     layout->addWidget(task_list_, 1);
 
-    // ── Buttons ───────────────────────────────────────────────────────────
+    // ── Normal action buttons ─────────────────────────────────────────────
     auto *btnRow = new QHBoxLayout;
     btn_start_ = new QPushButton("执行选中任务", grp);
     btn_stop_  = new QPushButton("停止",         grp);
@@ -116,6 +117,25 @@ QWidget* Tab4TaskConfig::buildTaskPanel()
     btnRow->addWidget(btn_reset_);
     layout->addLayout(btnRow);
 
+    // ── Big red E-STOP button ─────────────────────────────────────────────
+    // Always enabled, deliberately styled to be impossible to miss.
+    btn_estop_ = new QPushButton("急  停  ESTOP", grp);
+    btn_estop_->setFixedHeight(56);
+    btn_estop_->setStyleSheet(
+        "QPushButton {"
+        "  background: #c0392b;"
+        "  color: white;"
+        "  font-size: 20px;"
+        "  font-weight: bold;"
+        "  border: 3px solid #ffeb3b;"
+        "  border-radius: 6px;"
+        "  letter-spacing: 4px;"
+        "}"
+        "QPushButton:hover  { background: #e74c3c; }"
+        "QPushButton:pressed{ background: #962d22; border-color: #fbc02d; }"
+    );
+    layout->addWidget(btn_estop_);
+
     // ── Status ────────────────────────────────────────────────────────────
     task_status_label_ = new QLabel("就绪", grp);
     task_status_label_->setStyleSheet("font-family: Consolas; color: #dde1f0;");
@@ -124,6 +144,13 @@ QWidget* Tab4TaskConfig::buildTaskPanel()
     connect(btn_start_, &QPushButton::clicked, this, &Tab4TaskConfig::onStartTask);
     connect(btn_stop_,  &QPushButton::clicked, this, &Tab4TaskConfig::onStopTask);
     connect(btn_reset_, &QPushButton::clicked, this, &Tab4TaskConfig::onResetTask);
+    connect(btn_estop_, &QPushButton::clicked, this, &Tab4TaskConfig::onEstopTask);
+
+    // Periodically poll the backend for task status so the GUI reflects
+    // FSM transitions / failures even when no button is pressed.
+    poll_timer_ = new QTimer(this);
+    connect(poll_timer_, &QTimer::timeout, this, &Tab4TaskConfig::onPollTaskStatus);
+    poll_timer_->start(1000);
 
     return grp;
 }
@@ -171,6 +198,83 @@ void Tab4TaskConfig::onResetTask()
             btn_stop_->setEnabled(false);
         });
     log_widget_->appendLog("INFO", "[任务] 已发送复位指令");
+}
+
+void Tab4TaskConfig::onEstopTask()
+{
+    // Hard estop: send TASK_STOP (which the gateway translates to "ESTOP")
+    // unconditionally and immediately, no matter what state the GUI thinks
+    // the task is in. The backend will:
+    //  1. abort the running FSM
+    //  2. call dev_emergency_stop_all() -> proc_arm.stop via unix socket
+    //  3. transition into estop state
+    btn_start_->setEnabled(false);
+    btn_stop_->setEnabled(false);
+    task_status_label_->setText("急停已触发，等待复位");
+    task_status_label_->setStyleSheet(
+        "font-family: Consolas; color: #ffeb3b; font-weight: bold;");
+    log_widget_->appendLog("ERROR", "[任务] >>> 急停 <<<");
+
+    if (rpc_ && rpc_->isConnected()) {
+        rpc_->call(Protocol::Methods::TASK_STOP, QJsonObject{},
+            [this](QJsonObject) {
+                // Re-enable the start button after a short delay so the user
+                // can rerun via 复位 -> 执行 without staring at a frozen UI.
+                QTimer::singleShot(500, this, [this]() {
+                    btn_start_->setEnabled(true);
+                });
+            });
+    }
+}
+
+void Tab4TaskConfig::onPollTaskStatus()
+{
+    if (!rpc_ || !rpc_->isConnected()) return;
+    rpc_->call(Protocol::Methods::TASK_GET_STATUS, QJsonObject{},
+        [this](QJsonObject result) {
+            updateStatusFromBackend(result);
+        });
+}
+
+void Tab4TaskConfig::updateStatusFromBackend(const QJsonObject &status)
+{
+    // Backend returns: {active, task, status, reason}
+    const bool   active = status.value("active").toBool(false);
+    const QString st    = status.value("status").toString("idle");
+    const QString task  = status.value("task").toString("NONE");
+    const QString reason = status.value("reason").toString();
+
+    QString display;
+    QString css = "font-family: Consolas; color: #dde1f0;";
+    if (st == "running") {
+        display = QString("运行中: %1").arg(task);
+        css = "font-family: Consolas; color: #4caf50;";
+        btn_start_->setEnabled(false);
+        btn_stop_->setEnabled(true);
+    } else if (st == "done") {
+        display = QString("完成: %1").arg(task);
+        css = "font-family: Consolas; color: #4caf50;";
+        btn_start_->setEnabled(true);
+        btn_stop_->setEnabled(false);
+    } else if (st == "failed") {
+        display = QString("失败: %1").arg(reason);
+        css = "font-family: Consolas; color: #f44336;";
+        btn_start_->setEnabled(true);
+        btn_stop_->setEnabled(false);
+    } else if (st == "stopped") {
+        display = QString("已停止: %1").arg(reason);
+        css = "font-family: Consolas; color: #ffeb3b;";
+        btn_start_->setEnabled(true);
+        btn_stop_->setEnabled(false);
+    } else {
+        display = "就绪";
+        if (!active) {
+            btn_start_->setEnabled(true);
+            btn_stop_->setEnabled(false);
+        }
+    }
+    task_status_label_->setText(display);
+    task_status_label_->setStyleSheet(css);
 }
 
 void Tab4TaskConfig::onStartResult(QJsonObject result)

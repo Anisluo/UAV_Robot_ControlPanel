@@ -9,11 +9,15 @@ class QDoubleSpinBox;
 class QPushButton;
 class QRadioButton;
 class QLabel;
+class QSettings;
 
 class UGVWidget : public QGroupBox {
     Q_OBJECT
 public:
     explicit UGVWidget(RpcClient *rpc, QWidget *parent = nullptr);
+
+    void loadConfig(QSettings &s);
+    void saveConfig(QSettings &s) const;
 
 private slots:
     void onVxSliderChanged(int value);

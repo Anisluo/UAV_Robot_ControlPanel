@@ -1,7 +1,9 @@
 #include <QApplication>
 #include <QNetworkProxy>
 #include <QIcon>
+#include <QSettings>
 #include <QtGlobal>
+#include <QDebug>
 #include "gui/MainWindow.h"
 #include "gui/AppIcon.h"
 #include "gui/StyleSheet.h"
@@ -31,6 +33,18 @@ int main(int argc, char *argv[])
     app.setOrganizationName("RoboticsLab");
     app.setOrganizationDomain("roboticslab.local");
     app.setWindowIcon(createAppIcon());
+
+    // Persist UI parameters in a human-readable INI file. Using IniFormat
+    // gives us a portable file under the user's config directory:
+    //   Windows: %APPDATA%/RoboticsLab/HostGUI.ini
+    //   Linux:   ~/.config/RoboticsLab/HostGUI.ini
+    // All widgets simply construct `QSettings settings;` and the lookup
+    // routes to this file automatically via the org/app name set above.
+    QSettings::setDefaultFormat(QSettings::IniFormat);
+    {
+        QSettings probe;
+        qInfo() << "[HostGUI] config file:" << probe.fileName();
+    }
 
     // Apply dark scientific theme globally
     app.setStyleSheet(StyleSheet::darkTheme());

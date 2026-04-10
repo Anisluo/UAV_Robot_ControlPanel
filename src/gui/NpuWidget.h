@@ -13,6 +13,7 @@ class QLabel;
 class QDoubleSpinBox;
 class QTableWidget;
 class QTimer;
+class QSettings;
 
 // NPU Recognition Strategy Control Widget
 // Provides: strategy selection, start/stop, threshold config,
@@ -21,6 +22,9 @@ class NpuWidget : public QWidget {
     Q_OBJECT
 public:
     explicit NpuWidget(RpcClient *rpc, QWidget *parent = nullptr);
+
+    void loadConfig(QSettings &s);
+    void saveConfig(QSettings &s) const;
 
 private slots:
     void onStart();

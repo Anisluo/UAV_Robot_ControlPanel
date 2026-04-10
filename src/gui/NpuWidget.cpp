@@ -17,6 +17,7 @@
 #include <QJsonObject>
 #include <QJsonArray>
 #include <QJsonValue>
+#include <QSettings>
 
 NpuWidget::NpuWidget(RpcClient *rpc, QWidget *parent)
     : QWidget(parent)
@@ -211,4 +212,26 @@ void NpuWidget::setStatus(const QString &text, const QString &color)
     status_label_->setText(text);
     status_label_->setStyleSheet(
         QString("font-family: Consolas; color: %1;").arg(color));
+}
+
+void NpuWidget::loadConfig(QSettings &s)
+{
+    s.beginGroup("NpuWidget");
+    if (strategy_combo_) {
+        const QString name = s.value("strategy", strategy_combo_->currentText()).toString();
+        const int idx = strategy_combo_->findText(name);
+        if (idx >= 0) strategy_combo_->setCurrentIndex(idx);
+    }
+    if (threshold_spin_) {
+        threshold_spin_->setValue(s.value("threshold", threshold_spin_->value()).toDouble());
+    }
+    s.endGroup();
+}
+
+void NpuWidget::saveConfig(QSettings &s) const
+{
+    s.beginGroup("NpuWidget");
+    if (strategy_combo_) s.setValue("strategy", strategy_combo_->currentText());
+    if (threshold_spin_) s.setValue("threshold", threshold_spin_->value());
+    s.endGroup();
 }

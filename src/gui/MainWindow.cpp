@@ -31,6 +31,8 @@
 #include <QFrame>
 #include <QJsonObject>
 #include <QTimer>
+#include <QSettings>
+#include <QCloseEvent>
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
@@ -65,10 +67,21 @@ MainWindow::MainWindow(QWidget *parent)
     btn_disconnect_->setEnabled(false);
     setLedColor("#353650");
     status_label_->setText("未连接");
+
+    // Restore previously-saved UI parameters from the persistent INI file.
+    // Done last so all child widgets exist and their loadConfig() can run.
+    loadConfig();
 }
 
 MainWindow::~MainWindow()
 {
+}
+
+void MainWindow::closeEvent(QCloseEvent *event)
+{
+    // Persist all UI parameters before the window goes away.
+    saveConfig();
+    QMainWindow::closeEvent(event);
 }
 
 void MainWindow::buildUi()
@@ -123,7 +136,7 @@ QWidget* MainWindow::buildDashboardTab()
     camera_widget_ = new CameraWidget(leftSplitter);
     camera_widget_->setMinimumHeight(300);
 
-    log_widget_ = new LogWidget(leftSplitter);
+    log_widget_ = new LogWidget(rpc_client_, leftSplitter);
     log_widget_->setMinimumHeight(120);
 
     leftSplitter->addWidget(camera_widget_);
@@ -141,7 +154,7 @@ QWidget* MainWindow::buildDashboardTab()
     scrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
 
     auto *rightContainer = new QWidget(scrollArea);
-    rightContainer->setMinimumWidth(320);
+    rightContainer->setMinimumWidth(460);
     auto *rightLayout = new QVBoxLayout(rightContainer);
     rightLayout->setSpacing(8);
     rightLayout->setContentsMargins(4, 4, 4, 4);
@@ -171,9 +184,9 @@ QWidget* MainWindow::buildDashboardTab()
     scrollArea->setWidget(rightContainer);
     mainSplitter->addWidget(scrollArea);
 
-    mainSplitter->setStretchFactor(0, 3);
-    mainSplitter->setStretchFactor(1, 1);
-    mainSplitter->setSizes({1000, 380});
+    mainSplitter->setStretchFactor(0, 5);
+    mainSplitter->setStretchFactor(1, 3);
+    mainSplitter->setSizes({820, 560});
 
     return dashWidget;
 }
@@ -277,6 +290,13 @@ void MainWindow::onRpcConnected()
     btn_disconnect_->setEnabled(true);
     setLedColor("#4caf50");
     status_label_->setText("已连接: " + host_edit_->text());
+
+    // Push the persisted speed overrides to the backend so the freshly
+    // (re)started proc_arm honors what the GUI is showing for move/zero RPM
+    // instead of falling back to compiled defaults.
+    if (arm_widget_) {
+        arm_widget_->pushSpeeds();
+    }
 }
 
 void MainWindow::onRpcDisconnected()
@@ -328,4 +348,59 @@ void MainWindow::onVideoEnabledToggled(bool checked)
                 fps_label_->setText("帧率: --");
             }
         });
+}
+
+void MainWindow::loadConfig()
+{
+    QSettings s;
+
+    // ----- MainWindow's own params -----
+    s.beginGroup("MainWindow");
+    const QByteArray geo = s.value("geometry").toByteArray();
+    if (!geo.isEmpty()) {
+        restoreGeometry(geo);
+    }
+    const QByteArray state = s.value("state").toByteArray();
+    if (!state.isEmpty()) {
+        restoreState(state);
+    }
+    host_edit_->setText(s.value("host", host_edit_->text()).toString());
+    rpc_port_spin_->setValue(s.value("rpc_port", rpc_port_spin_->value()).toInt());
+    video_port_spin_->setValue(s.value("video_port", video_port_spin_->value()).toInt());
+    video_enable_radio_->setChecked(
+        s.value("video_enabled", video_enable_radio_->isChecked()).toBool());
+    if (tab_widget_) {
+        tab_widget_->setCurrentIndex(s.value("current_tab", 0).toInt());
+    }
+    s.endGroup();
+
+    // ----- Delegate to children that know how to persist themselves -----
+    if (tab2_) tab2_->loadConfig(s);
+    if (arm_widget_) arm_widget_->loadConfig(s);
+    if (ugv_widget_) ugv_widget_->loadConfig(s);
+    if (npu_widget_) npu_widget_->loadConfig(s);
+}
+
+void MainWindow::saveConfig() const
+{
+    QSettings s;
+
+    s.beginGroup("MainWindow");
+    s.setValue("geometry", saveGeometry());
+    s.setValue("state", saveState());
+    s.setValue("host", host_edit_->text());
+    s.setValue("rpc_port", rpc_port_spin_->value());
+    s.setValue("video_port", video_port_spin_->value());
+    s.setValue("video_enabled", video_enable_radio_->isChecked());
+    if (tab_widget_) {
+        s.setValue("current_tab", tab_widget_->currentIndex());
+    }
+    s.endGroup();
+
+    if (tab2_) tab2_->saveConfig(s);
+    if (arm_widget_) arm_widget_->saveConfig(s);
+    if (ugv_widget_) ugv_widget_->saveConfig(s);
+    if (npu_widget_) npu_widget_->saveConfig(s);
+
+    s.sync();
 }

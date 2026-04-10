@@ -22,6 +22,7 @@ namespace Methods {
     constexpr const char* ARM_HOME_JOINT     = "arm.home_joint";
     constexpr const char* ARM_MOVE_JOINT     = "arm.move_joint";
     constexpr const char* ARM_STOP           = "arm.stop";
+    constexpr const char* ARM_SET_SPEEDS     = "arm.set_speeds";
     constexpr const char* UGV_SET_VELOCITY   = "ugv.set_velocity";
     constexpr const char* UGV_STOP           = "ugv.stop";
     constexpr const char* AIRPORT_SET_RAIL   = "airport.set_rail";

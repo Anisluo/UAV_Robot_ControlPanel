@@ -11,6 +11,7 @@
 #include <QLabel>
 #include <QRadioButton>
 #include <QJsonObject>
+#include <QSettings>
 #include <QtGlobal>
 
 #include <cmath>
@@ -219,4 +220,32 @@ void UGVWidget::onStop()
     if (rpc_ && rpc_->isConnected()) {
         rpc_->call(Protocol::Methods::UGV_STOP, QJsonObject{});
     }
+}
+
+void UGVWidget::loadConfig(QSettings &s)
+{
+    s.beginGroup("UGVWidget");
+    if (vx_spin_) {
+        vx_spin_->setValue(s.value("vx", vx_spin_->value()).toDouble());
+    }
+    if (omega_spin_) {
+        omega_spin_->setValue(s.value("omega", omega_spin_->value()).toDouble());
+    }
+    if (vx_limit_radio_) {
+        vx_limit_radio_->setChecked(s.value("vx_limit_enabled", vx_limit_radio_->isChecked()).toBool());
+    }
+    if (vx_limit_spin_) {
+        vx_limit_spin_->setValue(s.value("vx_limit", vx_limit_spin_->value()).toDouble());
+    }
+    s.endGroup();
+}
+
+void UGVWidget::saveConfig(QSettings &s) const
+{
+    s.beginGroup("UGVWidget");
+    if (vx_spin_)        s.setValue("vx", vx_spin_->value());
+    if (omega_spin_)     s.setValue("omega", omega_spin_->value());
+    if (vx_limit_radio_) s.setValue("vx_limit_enabled", vx_limit_radio_->isChecked());
+    if (vx_limit_spin_)  s.setValue("vx_limit", vx_limit_spin_->value());
+    s.endGroup();
 }
