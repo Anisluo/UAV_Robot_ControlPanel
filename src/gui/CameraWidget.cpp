@@ -32,6 +32,12 @@ void CameraWidget::updateFps(double fps)
     update();
 }
 
+void CameraWidget::setDetections(const QVector<DetectionBox> &dets)
+{
+    detections_ = dets;
+    update();
+}
+
 void CameraWidget::onNoSignalTimeout()
 {
     has_signal_ = false;
@@ -79,6 +85,55 @@ void CameraWidget::paintEvent(QPaintEvent *event)
         target = QRect(tx, ty, tw, th);
     }
     p.drawImage(target, current_frame_);
+
+    // ── Draw detection boxes over the frame ─────────────────────────────
+    if (!detections_.isEmpty() && !current_frame_.isNull()) {
+        const double sx = (double)target.width()  / current_frame_.width();
+        const double sy = (double)target.height() / current_frame_.height();
+        QFont bf = p.font();
+        bf.setFamily("Consolas");
+        bf.setPointSize(9);
+        bf.setBold(true);
+        p.setFont(bf);
+        QFontMetrics bfm(bf);
+
+        for (const DetectionBox &d : detections_) {
+            int rx = target.x() + (int)(d.x1 * sx);
+            int ry = target.y() + (int)(d.y1 * sy);
+            int rw = (int)((d.x2 - d.x1) * sx);
+            int rh = (int)((d.y2 - d.y1) * sy);
+            QRect box(rx, ry, rw, rh);
+
+            // Colored rectangle — bright green for normal, orange for has_xyz.
+            QColor c = d.has_xyz ? QColor(0xff, 0x9f, 0x00) : QColor(0x4c, 0xaf, 0x50);
+            QPen pen(c);
+            pen.setWidth(2);
+            p.setPen(pen);
+            p.setBrush(Qt::NoBrush);
+            p.drawRect(box);
+
+            // Label background + text
+            QString label;
+            if (d.has_xyz) {
+                label = QString("#%1 %2%  Z=%3mm")
+                            .arg(d.class_id)
+                            .arg((int)(d.score * 100))
+                            .arg((int)d.z_mm);
+            } else {
+                label = QString("#%1 %2%").arg(d.class_id).arg((int)(d.score * 100));
+            }
+            QRect tr = bfm.boundingRect(label);
+            int pad = 3;
+            QRect bgR(rx, ry - tr.height() - 2*pad,
+                      tr.width() + 2*pad, tr.height() + 2*pad);
+            if (bgR.y() < target.y()) {
+                bgR.moveTop(ry + 2);  // flip below if too close to top
+            }
+            p.fillRect(bgR, QColor(0, 0, 0, 180));
+            p.setPen(c);
+            p.drawText(bgR, Qt::AlignCenter, label);
+        }
+    }
 
     // Info overlay (top-right)
     QString info = QString("%1x%2  %3 帧率")

@@ -54,6 +54,7 @@ namespace Methods {
     // Video control
     constexpr const char* VIDEO_SET_ENABLED  = "video.set_enabled";
     constexpr const char* VIDEO_GET_STATUS   = "video.get_status";
+    constexpr const char* VIDEO_SET_SOURCE   = "video.set_source";  // "rgb" | "depth"
 }
 
 // JSON field name constants

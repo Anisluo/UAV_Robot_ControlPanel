@@ -30,6 +30,7 @@
 #include <QStatusBar>
 #include <QFrame>
 #include <QJsonObject>
+#include <QJsonArray>
 #include <QTimer>
 #include <QSettings>
 #include <QCloseEvent>
@@ -226,8 +227,22 @@ QWidget* MainWindow::buildConnectionGroup()
 
     auto *videoRow = new QHBoxLayout;
     video_enable_radio_ = new QRadioButton("使能视频传输", grp);
-    video_enable_radio_->setChecked(true);
+    // Default OFF to match the backend: proc_gateway only pushes MJPEG
+    // once the HostGUI opens the :7002 TCP connection, and we only open
+    // it when this toggle is on. Previously defaulting to true made the
+    // UI lie about the real state, forcing the user to click it OFF
+    // then ON to actually start the stream.
+    video_enable_radio_->setChecked(false);
     videoRow->addWidget(video_enable_radio_);
+
+    // RGB / Depth switch — only one stream is sent at a time on :7002 so
+    // bandwidth stays flat. Default RGB; pressed state = depth.
+    btn_video_source_ = new QPushButton("切换深度图", grp);
+    btn_video_source_->setCheckable(true);
+    btn_video_source_->setChecked(false);
+    btn_video_source_->setFixedHeight(26);
+    videoRow->addWidget(btn_video_source_);
+
     videoRow->addStretch();
     layout->addLayout(videoRow);
 
@@ -253,6 +268,7 @@ QWidget* MainWindow::buildConnectionGroup()
     connect(btn_connect_,    &QPushButton::clicked, this, &MainWindow::onConnect);
     connect(btn_disconnect_, &QPushButton::clicked, this, &MainWindow::onDisconnect);
     connect(video_enable_radio_, &QRadioButton::toggled, this, &MainWindow::onVideoEnabledToggled);
+    connect(btn_video_source_,   &QPushButton::clicked, this, &MainWindow::onVideoSourceToggled);
 
     return grp;
 }
@@ -296,6 +312,32 @@ void MainWindow::onRpcConnected()
     // instead of falling back to compiled defaults.
     if (arm_widget_) {
         arm_widget_->pushSpeeds();
+    }
+
+    // Start polling NPU detections so the camera view shows bounding boxes.
+    if (det_timer_ == nullptr) {
+        det_timer_ = new QTimer(this);
+        det_timer_->setInterval(300);   // 3-4 Hz polling — matches typical detector rate
+        connect(det_timer_, &QTimer::timeout, this, &MainWindow::pollDetections);
+    }
+    det_timer_->start();
+
+    // Apply the current video-toggle state now that RPC is up. The
+    // toggled() signal does nothing before RPC is connected (see
+    // onVideoEnabledToggled's early-return), so we explicitly replay it
+    // here — otherwise a persisted-on toggle would just sit there and
+    // the user would have to re-click it to actually start the stream.
+    if (video_enable_radio_ && video_enable_radio_->isChecked()) {
+        onVideoEnabledToggled(true);
+    }
+
+    // Re-assert the RGB/Depth source — gateway resets to RGB on each
+    // (re)start, so if the UI remembers "depth" we push it back.
+    if (video_source_depth_) {
+        QJsonObject params;
+        params["source"] = "depth";
+        rpc_client_->call(Protocol::Methods::VIDEO_SET_SOURCE, params,
+            [](QJsonObject) {});
     }
 
     // Probe sub-process health via gateway-forwarded pings.
@@ -347,6 +389,36 @@ void MainWindow::onRpcDisconnected()
     setLedColor("#353650");
     status_label_->setText("未连接");
     fps_label_->setText("帧率: --");
+
+    if (det_timer_) det_timer_->stop();
+    camera_widget_->setDetections({});
+}
+
+void MainWindow::pollDetections()
+{
+    if (!rpc_client_->isConnected()) return;
+    rpc_client_->call("npu.get_detections", QJsonObject(),
+        [this](QJsonObject reply) {
+            QVector<DetectionBox> out;
+            QJsonArray arr = reply.value("detections").toArray();
+            out.reserve(arr.size());
+            for (const auto &v : arr) {
+                QJsonObject o = v.toObject();
+                DetectionBox d;
+                d.class_id = o.value("class_id").toInt();
+                d.score    = (float)o.value("score").toDouble();
+                d.x1       = (float)o.value("x1").toDouble();
+                d.y1       = (float)o.value("y1").toDouble();
+                d.x2       = (float)o.value("x2").toDouble();
+                d.y2       = (float)o.value("y2").toDouble();
+                d.x_mm     = (float)o.value("x_mm").toDouble();
+                d.y_mm     = (float)o.value("y_mm").toDouble();
+                d.z_mm     = (float)o.value("z_mm").toDouble();
+                d.has_xyz  = o.value("has_xyz").toInt() != 0;
+                out.push_back(d);
+            }
+            camera_widget_->setDetections(out);
+        });
 }
 
 void MainWindow::onFpsUpdated(double fps)
@@ -391,6 +463,31 @@ void MainWindow::onVideoEnabledToggled(bool checked)
         });
 }
 
+void MainWindow::onVideoSourceToggled()
+{
+    // The button is checkable — Qt flipped its state before this slot,
+    // so isChecked() already reflects what the user asked for.
+    video_source_depth_ = btn_video_source_->isChecked();
+    btn_video_source_->setText(video_source_depth_ ? "切换RGB图" : "切换深度图");
+
+    if (!rpc_client_ || !rpc_client_->isConnected()) {
+        // No connection yet: the GUI state flips locally; the gateway
+        // switch fires on the next RPC (re)connect (see onRpcConnected).
+        return;
+    }
+
+    QJsonObject params;
+    params["source"] = video_source_depth_ ? "depth" : "rgb";
+    rpc_client_->call(Protocol::Methods::VIDEO_SET_SOURCE, params,
+        [this](QJsonObject) {
+            log_widget_->appendLog(
+                "INFO",
+                video_source_depth_
+                    ? QStringLiteral("[视频] 已切换到深度图（伪彩）。")
+                    : QStringLiteral("[视频] 已切换到 RGB 图像。"));
+        });
+}
+
 void MainWindow::loadConfig()
 {
     QSettings s;
@@ -410,6 +507,11 @@ void MainWindow::loadConfig()
     video_port_spin_->setValue(s.value("video_port", video_port_spin_->value()).toInt());
     video_enable_radio_->setChecked(
         s.value("video_enabled", video_enable_radio_->isChecked()).toBool());
+    video_source_depth_ = s.value("video_source_depth", false).toBool();
+    if (btn_video_source_) {
+        btn_video_source_->setChecked(video_source_depth_);
+        btn_video_source_->setText(video_source_depth_ ? "切换RGB图" : "切换深度图");
+    }
     if (tab_widget_) {
         tab_widget_->setCurrentIndex(s.value("current_tab", 0).toInt());
     }
@@ -433,6 +535,7 @@ void MainWindow::saveConfig() const
     s.setValue("rpc_port", rpc_port_spin_->value());
     s.setValue("video_port", video_port_spin_->value());
     s.setValue("video_enabled", video_enable_radio_->isChecked());
+    s.setValue("video_source_depth", video_source_depth_);
     if (tab_widget_) {
         s.setValue("current_tab", tab_widget_->currentIndex());
     }

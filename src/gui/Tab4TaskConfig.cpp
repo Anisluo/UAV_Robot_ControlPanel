@@ -97,6 +97,7 @@ QWidget* Tab4TaskConfig::buildTaskPanel()
 
     addTask("机械臂演示运动", "单轴往复运动 (用于验证任务调度链路)",      "arm_demo");
     addTask("机械臂回零",     "六轴机械臂回零位",                          "arm_home");
+    addTask("视觉抓取放置",   "相机识别 → 手眼标定 → 六轴抓取 → 放到目标位", "pick_place");
     addTask("电池拾取任务",   "识别方形电池 → 机械臂夹取 → 放入电池槽",    "battery_pick");
     addTask("平台锁定",       "锁定承载平台",                              "platform_lock");
 

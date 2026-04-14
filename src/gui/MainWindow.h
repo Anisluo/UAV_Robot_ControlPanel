@@ -48,6 +48,8 @@ private slots:
     void onFpsUpdated(double fps);
     void onLogMessage(const QString &msg);
     void onVideoEnabledToggled(bool checked);
+    void onVideoSourceToggled();       // RGB <-> colorized depth
+    void pollDetections();
 
 private:
     void buildUi();
@@ -85,6 +87,8 @@ private:
     QSpinBox     *rpc_port_spin_;
     QSpinBox     *video_port_spin_;
     QRadioButton *video_enable_radio_;
+    QPushButton  *btn_video_source_;   // toggles RGB ⇄ colorized depth
+    bool          video_source_depth_{false};
     QPushButton  *btn_connect_;
     QPushButton  *btn_disconnect_;
     QLabel       *led_label_;
@@ -92,6 +96,9 @@ private:
     // Status bar
     QLabel       *status_label_;
     QLabel       *fps_label_;
+
+    // NPU detection polling (drives detection overlay on CameraWidget)
+    QTimer       *det_timer_{nullptr};
 };
 
 #endif // MAINWINDOW_H

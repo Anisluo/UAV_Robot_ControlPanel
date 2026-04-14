@@ -49,6 +49,8 @@ void NpuWidget::buildUi()
     strategy_combo_->addItem("方形电池检测 (default)",  0);
     strategy_combo_->addItem("电池 V2 (battery_v2)",    1);
     strategy_combo_->addItem("自定义 (custom)",          2);
+    strategy_combo_->addItem("人脸追踪 (face)",          3);
+    strategy_combo_->addItem("御三电池识别 (Mavic3 battery)", 4);
     stratRow->addWidget(strategy_combo_, 1);
 
     btn_apply_ = new QPushButton("应用", grp);
@@ -121,6 +123,10 @@ void NpuWidget::onStop()
 
 void NpuWidget::onSetStrategy()
 {
+    // "Apply" only switches the inference model / strategy. It never moves
+    // the arm — arm-follow for face tracking is a separate task, started
+    // explicitly by the user (e.g. task.start("face_track")), so that
+    // debugging detection boxes does not depend on any actuator being up.
     int id = strategy_combo_->currentData().toInt();
     QJsonObject params;
     params[Protocol::Fields::STRATEGY_ID] = id;
