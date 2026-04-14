@@ -69,7 +69,7 @@ void ArmWidget::buildUi()
 
         // target angle spinbox（目标位置，移动用）
         auto *targetSpin = new QDoubleSpinBox(this);
-        targetSpin->setRange(-360.0, 360.0);
+        targetSpin->setRange(0.0, 360.0);
         targetSpin->setSingleStep(1.0);
         targetSpin->setDecimals(1);
         targetSpin->setValue(0.0);
@@ -79,7 +79,7 @@ void ArmWidget::buildUi()
 
         // safe angle spinbox（安全位置，回零后移动到此）
         auto *safeSpin = new QDoubleSpinBox(this);
-        safeSpin->setRange(-360.0, 360.0);
+        safeSpin->setRange(0.0, 360.0);
         safeSpin->setSingleStep(1.0);
         safeSpin->setDecimals(1);
         safeSpin->setValue(0.0);

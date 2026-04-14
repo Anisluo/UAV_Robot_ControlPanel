@@ -20,10 +20,12 @@ constexpr SourceEntry kSources[] = {
     {"本地",          ""},
     {"uav_robotd",    "robotd"},
     {"proc_arm",      "proc_arm"},
+    {"proc_car",      "proc_car"},
     {"proc_gateway",  "proc_gateway"},
     {"proc_npu",      "proc_npu"},
     {"proc_realsense","proc_realsense"},
     {"proc_grasp",    "proc_grasp"},
+    {"proc_airport",  "proc_airport"},
 };
 }  // namespace
 

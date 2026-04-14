@@ -297,6 +297,47 @@ void MainWindow::onRpcConnected()
     if (arm_widget_) {
         arm_widget_->pushSpeeds();
     }
+
+    // Probe sub-process health via gateway-forwarded pings.
+    // Each ping tests whether the corresponding proc_* daemon is reachable.
+    struct ServiceProbe {
+        const char *method;   // ping routed through proc_gateway
+        const char *label;
+    };
+    static const ServiceProbe probes[] = {
+        {"arm.get_speeds",      "proc_arm"},
+        {"car.set_velocity",    "proc_car"},      // params missing → ok:false but no conn error
+    };
+
+    // Use system.ping first to confirm gateway itself
+    auto *results = new QStringList();
+    auto *remaining = new int(0);
+
+    // For each service, send a lightweight RPC. If the gateway can reach
+    // the sub-process socket the call succeeds; otherwise it returns an
+    // error or connection-refused which we surface to the user.
+    for (const auto &p : probes) {
+        (*remaining)++;
+        QString svc = QString::fromUtf8(p.label);
+        rpc_client_->call(
+            QString::fromUtf8(p.method), QJsonObject(),
+            [this, results, remaining, svc](QJsonObject reply) {
+                bool ok = reply.value("ok").toBool(false);
+                if (!ok && reply.contains("error")) {
+                    *results << (svc + ": offline");
+                }
+                if (--(*remaining) == 0) {
+                    if (!results->isEmpty()) {
+                        QString msg = results->join(", ");
+                        status_label_->setText("已连接: " + host_edit_->text() +
+                                               "  |  " + msg);
+                        log_widget_->appendLogMsg("[WARN] " + msg);
+                    }
+                    delete results;
+                    delete remaining;
+                }
+            });
+    }
 }
 
 void MainWindow::onRpcDisconnected()
