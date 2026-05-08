@@ -51,6 +51,7 @@ void NpuWidget::buildUi()
     strategy_combo_->addItem("自定义 (custom)",          2);
     strategy_combo_->addItem("人脸追踪 (face)",          3);
     strategy_combo_->addItem("御三电池识别 (Mavic3 battery)", 4);
+    strategy_combo_->addItem("御三无人机识别 (Mavic3 drone)",  5);
     stratRow->addWidget(strategy_combo_, 1);
 
     btn_apply_ = new QPushButton("应用", grp);
