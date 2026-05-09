@@ -132,28 +132,30 @@ void ArmWidget::buildUi()
         "QPushButton:pressed { background: #962d22; }"
     );
 
-    // 移动速度 (RPM) — 推送给后端的 UAV_ARM_RPM 覆盖
+    // 关节移动速度 (°/s) — proc_arm 会按各关节减速比换算成不同的电机 RPM。
+    // 这样 J1（25:1）和 J6（1:1）在同一速度下末端表现一致。
     move_speed_spin_ = new QSpinBox(this);
-    move_speed_spin_->setRange(1, 3000);
-    move_speed_spin_->setSingleStep(10);
-    move_speed_spin_->setValue(300);
-    move_speed_spin_->setSuffix(" RPM");
+    move_speed_spin_->setRange(1, 360);
+    move_speed_spin_->setSingleStep(5);
+    move_speed_spin_->setValue(60);
+    move_speed_spin_->setSuffix(" °/s");
     move_speed_spin_->setFixedWidth(96);
     move_speed_spin_->setFixedHeight(26);
-    move_speed_spin_->setToolTip("各轴移动指令的目标转速。修改后会立即发送到机器人。");
+    move_speed_spin_->setToolTip("关节末端速度 (°/s)。所有关节统一这个值，"
+                                 "proc_arm 按减速比转成各电机 RPM。");
 
-    auto *moveSpeedLabel = new QLabel("移动速度:", this);
+    auto *moveSpeedLabel = new QLabel("关节速度:", this);
     moveSpeedLabel->setStyleSheet("color: #607d8b; font-size: 11px;");
 
-    // 归零速度 (RPM) — 推送给后端的 UAV_ARM_ZERO_SPEED_RPM 覆盖
+    // 归零速度 (°/s) — 同样按减速比换算
     zero_speed_spin_ = new QSpinBox(this);
-    zero_speed_spin_->setRange(1, 3000);
-    zero_speed_spin_->setSingleStep(5);
-    zero_speed_spin_->setValue(30);
-    zero_speed_spin_->setSuffix(" RPM");
+    zero_speed_spin_->setRange(1, 60);
+    zero_speed_spin_->setSingleStep(1);
+    zero_speed_spin_->setValue(5);
+    zero_speed_spin_->setSuffix(" °/s");
     zero_speed_spin_->setFixedWidth(96);
     zero_speed_spin_->setFixedHeight(26);
-    zero_speed_spin_->setToolTip("回零时的目标转速 (碰撞/堵转检测速度)。修改后会立即发送。");
+    zero_speed_spin_->setToolTip("回零时的关节末端速度 (°/s)。建议低速以便撞限位时安全停下。");
 
     auto *zeroSpeedLabel = new QLabel("归零速度:", this);
     zeroSpeedLabel->setStyleSheet("color: #607d8b; font-size: 11px;");
@@ -331,17 +333,19 @@ void ArmWidget::pushSpeeds()
     if (!rpc_ || !rpc_->isConnected()) return;
     if (!move_speed_spin_ || !zero_speed_spin_) return;
 
-    const int moveRpm = move_speed_spin_->value();
-    const int zeroRpm = zero_speed_spin_->value();
+    // SpinBox values are joint-output deg/s; proc_arm converts each to a
+    // per-joint motor RPM via gear ratio at command time.
+    const int joint_dps = move_speed_spin_->value();
+    const int zero_dps  = zero_speed_spin_->value();
 
     QJsonObject params;
-    params["move_rpm"] = moveRpm;
-    params["zero_rpm"] = zeroRpm;
+    params["joint_dps"] = joint_dps;
+    params["zero_dps"]  = zero_dps;
     rpc_->call(Protocol::Methods::ARM_SET_SPEEDS, params,
-               [this, moveRpm, zeroRpm](QJsonObject result) {
+               [this, joint_dps, zero_dps](QJsonObject result) {
         if (result.value("ok").toBool(false)) {
             status_label_->setText(
-                QString("速度已更新: 移动=%1 RPM, 归零=%2 RPM").arg(moveRpm).arg(zeroRpm));
+                QString("速度已更新: 移动=%1 °/s, 归零=%2 °/s").arg(joint_dps).arg(zero_dps));
         } else {
             status_label_->setText("速度更新失败");
         }
@@ -397,11 +401,16 @@ void ArmWidget::loadConfig(QSettings &s)
     if (zero_dwell_spin_) {
         zero_dwell_spin_->setValue(s.value("zero_dwell_ms", zero_dwell_spin_->value()).toInt());
     }
+    // Speed fields switched units (motor RPM -> joint °/s). Old "move_rpm"
+    // and "zero_rpm" keys may still hold motor-RPM values from earlier
+    // installs (the 13-RPM bug); ignore them and use the new keys.
     if (move_speed_spin_) {
-        move_speed_spin_->setValue(s.value("move_rpm", move_speed_spin_->value()).toInt());
+        move_speed_spin_->setValue(
+            s.value("joint_dps", move_speed_spin_->value()).toInt());
     }
     if (zero_speed_spin_) {
-        zero_speed_spin_->setValue(s.value("zero_rpm", zero_speed_spin_->value()).toInt());
+        zero_speed_spin_->setValue(
+            s.value("zero_dps", zero_speed_spin_->value()).toInt());
     }
     for (int i = 0; i < target_spins_.size(); ++i) {
         if (!target_spins_[i]) continue;
@@ -423,10 +432,10 @@ void ArmWidget::saveConfig(QSettings &s) const
         s.setValue("zero_dwell_ms", zero_dwell_spin_->value());
     }
     if (move_speed_spin_) {
-        s.setValue("move_rpm", move_speed_spin_->value());
+        s.setValue("joint_dps", move_speed_spin_->value());
     }
     if (zero_speed_spin_) {
-        s.setValue("zero_rpm", zero_speed_spin_->value());
+        s.setValue("zero_dps", zero_speed_spin_->value());
     }
     for (int i = 0; i < target_spins_.size(); ++i) {
         if (!target_spins_[i]) continue;
