@@ -5,6 +5,9 @@
 #include <QResizeEvent>
 #include <QFontMetrics>
 
+#include <algorithm>
+#include <cmath>
+
 CameraWidget::CameraWidget(QWidget *parent)
     : QWidget(parent)
     , no_signal_timer_(new QTimer(this))
@@ -104,23 +107,80 @@ void CameraWidget::paintEvent(QPaintEvent *event)
             int rh = (int)((d.y2 - d.y1) * sy);
             QRect box(rx, ry, rw, rh);
 
-            // Colored rectangle — bright green for normal, orange for has_xyz.
-            QColor c = d.has_xyz ? QColor(0xff, 0x9f, 0x00) : QColor(0x4c, 0xaf, 0x50);
+            // Per-class colour & display name. The detector backend
+            // ships two recognised classes today: 4 = drone (NPU YOLOv8
+            // airplane class), 200 = Mavic 3 battery (battery_tracker
+            // CV sidecar). Anything else falls back to the legacy green
+            // / orange pair so debug/test classes still draw something.
+            const char *class_name;
+            QColor c;
+            switch (d.class_id) {
+                case 4:
+                    class_name = "UAV";
+                    c = QColor(0x29, 0xb6, 0xf6);   // light blue
+                    break;
+                case 200:
+                    class_name = "battery";
+                    c = QColor(0xff, 0x9f, 0x00);   // orange
+                    break;
+                default:
+                    class_name = nullptr;
+                    c = d.has_xyz ? QColor(0xff, 0x9f, 0x00)
+                                  : QColor(0x4c, 0xaf, 0x50);
+                    break;
+            }
             QPen pen(c);
             pen.setWidth(2);
             p.setPen(pen);
             p.setBrush(Qt::NoBrush);
             p.drawRect(box);
 
-            // Label background + text
+            if (d.has_rpy) {
+                const double kPi = 3.14159265358979323846;
+                const double rad = double(d.yaw_deg) * kPi / 180.0;
+                const QPointF center(rx + rw * 0.5, ry + rh * 0.5);
+                const double len = std::max(18.0, std::min(rw, rh) * 0.45);
+                const QPointF tip(center.x() + std::cos(rad) * len,
+                                  center.y() + std::sin(rad) * len);
+                QPen axisPen(QColor(0x00, 0xe5, 0xff));
+                axisPen.setWidth(3);
+                axisPen.setCapStyle(Qt::RoundCap);
+                p.setPen(axisPen);
+                p.drawLine(center, tip);
+
+                const double head = 7.0;
+                const double left = rad + 2.55;
+                const double right = rad - 2.55;
+                p.drawLine(tip, QPointF(tip.x() + std::cos(left) * head,
+                                        tip.y() + std::sin(left) * head));
+                p.drawLine(tip, QPointF(tip.x() + std::cos(right) * head,
+                                        tip.y() + std::sin(right) * head));
+            }
+
+            // Label background + text — class_name leads when known
+            // (UAV / battery), otherwise fall back to the numeric id.
+            const QString head = class_name
+                                 ? QString::fromLatin1(class_name)
+                                 : QString("#%1").arg(d.class_id);
             QString label;
-            if (d.has_xyz) {
-                label = QString("#%1 %2%  Z=%3mm")
-                            .arg(d.class_id)
+            if (d.has_xyz && d.has_rpy) {
+                label = QString("%1 %2%  Z=%3mm  yaw=%4°")
+                            .arg(head)
+                            .arg((int)(d.score * 100))
+                            .arg((int)d.z_mm)
+                            .arg((int)d.yaw_deg);
+            } else if (d.has_xyz) {
+                label = QString("%1 %2%  Z=%3mm")
+                            .arg(head)
                             .arg((int)(d.score * 100))
                             .arg((int)d.z_mm);
+            } else if (d.has_rpy) {
+                label = QString("%1 %2%  yaw=%3°")
+                            .arg(head)
+                            .arg((int)(d.score * 100))
+                            .arg((int)d.yaw_deg);
             } else {
-                label = QString("#%1 %2%").arg(d.class_id).arg((int)(d.score * 100));
+                label = QString("%1 %2%").arg(head).arg((int)(d.score * 100));
             }
             QRect tr = bfm.boundingRect(label);
             int pad = 3;

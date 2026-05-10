@@ -414,7 +414,9 @@ void MainWindow::pollDetections()
                 d.x_mm     = (float)o.value("x_mm").toDouble();
                 d.y_mm     = (float)o.value("y_mm").toDouble();
                 d.z_mm     = (float)o.value("z_mm").toDouble();
+                d.yaw_deg  = (float)o.value("yaw_deg").toDouble();
                 d.has_xyz  = o.value("has_xyz").toInt() != 0;
+                d.has_rpy  = o.value("has_rpy").toInt() != 0;
                 out.push_back(d);
             }
             camera_widget_->setDetections(out);

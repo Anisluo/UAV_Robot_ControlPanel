@@ -11,7 +11,9 @@ struct DetectionBox {
     float   score    = 0.0F;
     float   x1 = 0.0F, y1 = 0.0F, x2 = 0.0F, y2 = 0.0F;   // pixel coords in frame
     float   x_mm = 0.0F, y_mm = 0.0F, z_mm = 0.0F;        // camera-frame 3D (mm)
+    float   yaw_deg = 0.0F;                                // printed-face long axis
     bool    has_xyz  = false;
+    bool    has_rpy  = false;                              // yaw_deg is valid
 };
 
 class CameraWidget : public QWidget {
