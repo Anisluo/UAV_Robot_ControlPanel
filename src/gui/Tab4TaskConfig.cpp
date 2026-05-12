@@ -2,8 +2,12 @@
 #include "LogWidget.h"
 #include "ArmViewer3D.h"
 #include "ArmSyncWorker.h"
+#include "TaskFlowWidget.h"
 #include "core/RpcClient.h"
 #include "core/Protocol.h"
+
+#include <QRadioButton>
+#include <QButtonGroup>
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -65,9 +69,10 @@ void Tab4TaskConfig::buildUi()
 
     mainSplitter->addWidget(leftSplitter);
     mainSplitter->addWidget(buildTaskPanel());
-    mainSplitter->setStretchFactor(0, 3);
-    mainSplitter->setStretchFactor(1, 1);
-    mainSplitter->setSizes({760, 300});
+    // Flow chart is the main feature now → give it the bigger half.
+    mainSplitter->setStretchFactor(0, 2);
+    mainSplitter->setStretchFactor(1, 5);
+    mainSplitter->setSizes({420, 1000});
 
     outerLayout->addWidget(mainSplitter, 3);
 
@@ -268,87 +273,97 @@ void Tab4TaskConfig::onAnglesRequested()
 
 QWidget* Tab4TaskConfig::buildTaskPanel()
 {
-    auto *grp = new QGroupBox("Task Configuration", this);
+    auto *grp = new QGroupBox("电池换装任务", this);
     auto *layout = new QVBoxLayout(grp);
-    layout->setSpacing(8);
+    layout->setSpacing(6);
     layout->setContentsMargins(8, 18, 8, 8);
 
-    layout->addWidget(new QLabel("可用任务列表:", grp));
+    // ── Top toolbar: mode + run buttons + status ─────────────────────────
+    auto *bar = new QHBoxLayout;
 
-    task_list_ = new QListWidget(grp);
-    task_list_->setAlternatingRowColors(true);
-    task_list_->setStyleSheet(
-        "QListWidget { background: #ffffff; color: #1a1a2e; }"
-        "QListWidget::item { padding: 4px; }"
-        "QListWidget::item:alternate { background: #f0f2f8; }"
-        "QListWidget::item:selected { background: #1565c0; color: #ffffff; }"
-        "QListWidget::item:hover:!selected { background: #dce4f5; }");
+    auto *mode_box = new QButtonGroup(grp);
+    mode_sim_radio_  = new QRadioButton("模拟", grp);
+    mode_real_radio_ = new QRadioButton("实机", grp);
+    mode_sim_radio_->setChecked(true);
+    mode_box->addButton(mode_sim_radio_,  0);
+    mode_box->addButton(mode_real_radio_, 1);
+    bar->addWidget(new QLabel("模式:", grp));
+    bar->addWidget(mode_sim_radio_);
+    bar->addWidget(mode_real_radio_);
+    bar->addSpacing(20);
 
-    // Pre-defined task entries
-    auto addTask = [&](const QString &name, const QString &desc, const QString &key) {
-        auto *item = new QListWidgetItem(
-            QString("%1\n  %2").arg(name).arg(desc), task_list_);
-        item->setData(Qt::UserRole, key);
-        item->setSizeHint(QSize(0, 48));
-    };
+    btn_flow_start_ = new QPushButton("▶ 开始", grp);
+    btn_flow_stop_  = new QPushButton("⏸ 停止", grp);
+    btn_flow_reset_ = new QPushButton("↻ 复位", grp);
+    btn_flow_start_->setFixedHeight(32);
+    btn_flow_stop_->setFixedHeight(32);
+    btn_flow_reset_->setFixedHeight(32);
+    btn_flow_stop_->setEnabled(false);
+    btn_flow_start_->setStyleSheet(
+        "QPushButton { background:#3a8; color:white; font-weight:bold; padding:4px 14px; }"
+        "QPushButton:disabled { background:#446; color:#aab; }");
+    btn_flow_stop_->setStyleSheet(
+        "QPushButton { background:#c33; color:white; font-weight:bold; padding:4px 14px; }"
+        "QPushButton:disabled { background:#553; color:#aab; }");
+    bar->addWidget(btn_flow_start_);
+    bar->addWidget(btn_flow_stop_);
+    bar->addWidget(btn_flow_reset_);
+    bar->addStretch(1);
 
-    addTask("机械臂演示运动", "单轴往复运动 (用于验证任务调度链路)",      "arm_demo");
-    addTask("机械臂回零",     "六轴机械臂回零位",                          "arm_home");
-    addTask("视觉抓取放置",   "相机识别 → 手眼标定 → 六轴抓取 → 放到目标位", "pick_place");
-    addTask("电池拾取任务",   "识别方形电池 → 机械臂夹取 → 放入电池槽",    "battery_pick");
-    addTask("平台锁定",       "锁定承载平台",                              "platform_lock");
+    flow_status_label_ = new QLabel("就绪 · 模式: 模拟", grp);
+    flow_status_label_->setStyleSheet("font-family: Consolas; color: #c0d0f0;");
+    bar->addWidget(flow_status_label_);
 
-    task_list_->setCurrentRow(0);
-    layout->addWidget(task_list_, 1);
+    layout->addLayout(bar);
 
-    // ── Normal action buttons ─────────────────────────────────────────────
-    auto *btnRow = new QHBoxLayout;
-    btn_start_ = new QPushButton("执行选中任务", grp);
-    btn_stop_  = new QPushButton("停止",         grp);
-    btn_reset_ = new QPushButton("复位",         grp);
-    btn_start_->setFixedHeight(30);
-    btn_stop_->setFixedHeight(30);
-    btn_reset_->setFixedHeight(30);
-    btn_stop_->setEnabled(false);
-    btnRow->addWidget(btn_start_);
-    btnRow->addWidget(btn_stop_);
-    btnRow->addWidget(btn_reset_);
-    layout->addLayout(btnRow);
+    // ── Flow chart — the main attraction ─────────────────────────────────
+    flow_widget_ = new TaskFlowWidget(grp);
+    layout->addWidget(flow_widget_, /*stretch=*/1);
 
-    // ── Big red E-STOP button ─────────────────────────────────────────────
-    // Always enabled, deliberately styled to be impossible to miss.
+    // ── Big red E-STOP ───────────────────────────────────────────────────
     btn_estop_ = new QPushButton("急  停  ESTOP", grp);
-    btn_estop_->setFixedHeight(56);
+    btn_estop_->setFixedHeight(44);
     btn_estop_->setStyleSheet(
         "QPushButton {"
-        "  background: #c0392b;"
-        "  color: white;"
-        "  font-size: 20px;"
-        "  font-weight: bold;"
-        "  border: 3px solid #ffeb3b;"
-        "  border-radius: 6px;"
-        "  letter-spacing: 4px;"
+        "  background: #c0392b; color: white; font-size: 16px; font-weight: bold;"
+        "  border: 2px solid #ffeb3b; border-radius: 6px; letter-spacing: 3px;"
         "}"
         "QPushButton:hover  { background: #e74c3c; }"
-        "QPushButton:pressed{ background: #962d22; border-color: #fbc02d; }"
-    );
+        "QPushButton:pressed{ background: #962d22; border-color: #fbc02d; }");
     layout->addWidget(btn_estop_);
 
-    // ── Status ────────────────────────────────────────────────────────────
-    task_status_label_ = new QLabel("就绪", grp);
-    task_status_label_->setStyleSheet("font-family: Consolas; color: #dde1f0;");
-    layout->addWidget(task_status_label_);
+    // ── Legacy single-task pieces (kept invisible by default so the rest
+    //    of the file's old onStartTask/onStopTask plumbing still compiles
+    //    and can be wired up if you re-enable a tiny task panel later.) ──
+    task_list_         = new QListWidget(grp);
+    btn_start_         = new QPushButton("legacy_start", grp);
+    btn_stop_          = new QPushButton("legacy_stop",  grp);
+    btn_reset_         = new QPushButton("legacy_reset", grp);
+    task_status_label_ = new QLabel("", grp);
+    task_list_->hide(); btn_start_->hide(); btn_stop_->hide(); btn_reset_->hide();
+    task_status_label_->hide();
 
-    connect(btn_start_, &QPushButton::clicked, this, &Tab4TaskConfig::onStartTask);
-    connect(btn_stop_,  &QPushButton::clicked, this, &Tab4TaskConfig::onStopTask);
-    connect(btn_reset_, &QPushButton::clicked, this, &Tab4TaskConfig::onResetTask);
-    connect(btn_estop_, &QPushButton::clicked, this, &Tab4TaskConfig::onEstopTask);
+    // ── Signal wiring ────────────────────────────────────────────────────
+    connect(mode_sim_radio_,  &QRadioButton::toggled, this, &Tab4TaskConfig::onFlowModeChanged);
+    connect(mode_real_radio_, &QRadioButton::toggled, this, &Tab4TaskConfig::onFlowModeChanged);
+    connect(btn_flow_start_, &QPushButton::clicked,   this, &Tab4TaskConfig::onFlowStart);
+    connect(btn_flow_stop_,  &QPushButton::clicked,   this, &Tab4TaskConfig::onFlowStop);
+    connect(btn_flow_reset_, &QPushButton::clicked,   this, &Tab4TaskConfig::onFlowReset);
+    connect(btn_estop_,      &QPushButton::clicked,   this, &Tab4TaskConfig::onEstopTask);
+    connect(flow_widget_,    &TaskFlowWidget::stationClicked,
+            this,            &Tab4TaskConfig::onFlowStationClicked);
 
-    // Periodically poll the backend for task status so the GUI reflects
-    // FSM transitions / failures even when no button is pressed.
-    poll_timer_ = new QTimer(this);
-    connect(poll_timer_, &QTimer::timeout, this, &Tab4TaskConfig::onPollTaskStatus);
-    poll_timer_->start(1000);
+    // ── Timers ──────────────────────────────────────────────────────────
+    flow_sim_timer_ = new QTimer(this);
+    flow_sim_timer_->setInterval(33);       // ~30 Hz interpolation
+    connect(flow_sim_timer_, &QTimer::timeout, this, &Tab4TaskConfig::onFlowSimTick);
+
+    swap_poll_timer_ = new QTimer(this);
+    swap_poll_timer_->setInterval(500);     // 2 Hz polling
+    connect(swap_poll_timer_, &QTimer::timeout, this, &Tab4TaskConfig::onSwapStatusPoll);
+
+    poll_timer_ = new QTimer(this);   // kept for the (hidden) legacy task panel
+    poll_timer_->setSingleShot(true); // never fires unless explicitly started
 
     return grp;
 }
@@ -511,3 +526,189 @@ void Tab4TaskConfig::setConnectionParams(const QString &host, quint16 rpc_port, 
     Q_UNUSED(host) Q_UNUSED(rpc_port) Q_UNUSED(vid_port)
     // Reserved for future per-tab connection display
 }
+
+
+// ════════════════════════════════════════════════════════════════════════
+// Battery-swap flow pipeline (TaskFlowWidget integration)
+// ════════════════════════════════════════════════════════════════════════
+void Tab4TaskConfig::onFlowModeChanged()
+{
+    if (flow_running_) {
+        // Don't allow mode change mid-flight — operator likely meant to stop first.
+        appendLog("warn", "正在运行中, 请先停止再切换模式");
+        // Revert the toggle visually without re-firing the signal.
+        QSignalBlocker b1(mode_sim_radio_);
+        QSignalBlocker b2(mode_real_radio_);
+        mode_sim_radio_->setChecked(flow_simulating_);
+        mode_real_radio_->setChecked(!flow_simulating_);
+        return;
+    }
+    const bool sim = mode_sim_radio_->isChecked();
+    flow_status_label_->setText(QString("就绪 · 模式: %1").arg(sim ? "模拟" : "实机"));
+}
+
+void Tab4TaskConfig::onFlowStart()
+{
+    if (flow_running_) return;
+    flow_widget_->resetAll();
+
+    flow_simulating_ = mode_sim_radio_->isChecked();
+    flow_running_    = true;
+    btn_flow_start_->setEnabled(false);
+    btn_flow_stop_->setEnabled(true);
+
+    if (flow_simulating_) {
+        appendLog("info", "模拟模式启动 — 流程图驱动 3D 视图, 不接触真实机械臂");
+        // Seed starting joints from whatever's currently in the viewer.
+        flow_sim_start_joints_  = { 0, 0, 0, 0, 0, 0 };
+        flow_sim_target_joints_ = TaskFlowWidget::states()[0].demo_joints_deg;
+        flow_sim_state_idx_     = 0;
+        flow_sim_step_start_ms_ = QDateTime::currentMSecsSinceEpoch();
+        flow_widget_->setCurrentState(TaskFlowWidget::states()[0].id);
+        flow_status_label_->setText(QString("模拟运行 · %1/%2 · %3")
+                                       .arg(1)
+                                       .arg(TaskFlowWidget::states().size())
+                                       .arg(TaskFlowWidget::states()[0].label));
+        flow_sim_timer_->start();
+    } else {
+        appendLog("info", "实机模式启动 — 调用 swap.start (proc_battery_swap 须运行中)");
+        QJsonObject params;
+        rpc_->call("swap.start", params,
+            [this](QJsonObject reply) {
+                if (reply.value("ok").toBool(false)) {
+                    appendLog("info", "swap.start ok, 开始轮询状态");
+                    swap_poll_timer_->start();
+                } else {
+                    const QString err = reply.value("error").toString("RPC failed");
+                    appendLog("error", QString("swap.start 失败: %1").arg(err));
+                    flow_status_label_->setText(QString("启动失败: %1").arg(err));
+                    flow_running_ = false;
+                    btn_flow_start_->setEnabled(true);
+                    btn_flow_stop_->setEnabled(false);
+                }
+            });
+    }
+}
+
+void Tab4TaskConfig::onFlowStop()
+{
+    if (!flow_running_) return;
+    appendLog("info", "停止任务流程");
+    if (flow_simulating_) {
+        flow_sim_timer_->stop();
+    } else {
+        swap_poll_timer_->stop();
+        rpc_->call("swap.cancel", QJsonObject{}, nullptr);
+    }
+    flow_running_ = false;
+    btn_flow_start_->setEnabled(true);
+    btn_flow_stop_->setEnabled(false);
+    flow_status_label_->setText("已停止");
+}
+
+void Tab4TaskConfig::onFlowReset()
+{
+    if (flow_running_) onFlowStop();
+    flow_widget_->resetAll();
+    flow_sim_state_idx_ = -1;
+    flow_status_label_->setText(QString("就绪 · 模式: %1")
+                                   .arg(mode_sim_radio_->isChecked() ? "模拟" : "实机"));
+}
+
+void Tab4TaskConfig::onFlowSimTick()
+{
+    if (!flow_simulating_ || flow_sim_state_idx_ < 0) return;
+
+    const auto &states = TaskFlowWidget::states();
+    const qint64 now_ms = QDateTime::currentMSecsSinceEpoch();
+    const qint64 elapsed = now_ms - flow_sim_step_start_ms_;
+    const double t = qBound(0.0, double(elapsed) / double(flow_sim_step_dur_ms_), 1.0);
+    // Smooth ease-in-out so the 3D motion doesn't look mechanical.
+    const double s = (t < 0.5) ? 2.0 * t * t : 1.0 - std::pow(-2.0 * t + 2.0, 2.0) / 2.0;
+
+    // Interpolate joint angles and push into the viewer.
+    if (viewer_3d_ && flow_sim_start_joints_.size() == 6 && flow_sim_target_joints_.size() == 6) {
+        QVector<float> live(6);
+        for (int i = 0; i < 6; ++i) {
+            live[i] = float(flow_sim_start_joints_[i] +
+                            (flow_sim_target_joints_[i] - flow_sim_start_joints_[i]) * s);
+        }
+        viewer_3d_->setJointAngles(live);
+    }
+
+    if (t >= 1.0) {
+        // Mark the just-completed state as Done and advance to the next.
+        flow_widget_->markFinished(states[flow_sim_state_idx_].id);
+
+        if (flow_sim_state_idx_ + 1 >= states.size()) {
+            // Task complete.
+            appendLog("info", "模拟运行完成 — 全 24 状态走完");
+            flow_sim_timer_->stop();
+            flow_running_ = false;
+            btn_flow_start_->setEnabled(true);
+            btn_flow_stop_->setEnabled(false);
+            flow_status_label_->setText("模拟完成");
+            flow_sim_state_idx_ = -1;
+            return;
+        }
+
+        // Start the next state.
+        flow_sim_state_idx_++;
+        flow_sim_start_joints_   = flow_sim_target_joints_;
+        flow_sim_target_joints_  = states[flow_sim_state_idx_].demo_joints_deg;
+        flow_sim_step_start_ms_  = now_ms;
+        flow_widget_->setCurrentState(states[flow_sim_state_idx_].id);
+        flow_status_label_->setText(QString("模拟运行 · %1/%2 · %3")
+                                       .arg(flow_sim_state_idx_ + 1)
+                                       .arg(states.size())
+                                       .arg(states[flow_sim_state_idx_].label));
+    }
+}
+
+void Tab4TaskConfig::onSwapStatusPoll()
+{
+    if (!flow_running_ || flow_simulating_) return;
+
+    rpc_->call("swap.get_state", QJsonObject{},
+        [this](QJsonObject reply) {
+            if (reply.value("ok").toBool(true) == false &&
+                reply.contains("error")) {
+                // Service not running yet (proc_battery_swap to be built later).
+                const QString err = reply.value("error").toString();
+                flow_status_label_->setText(QString("等待 swap 服务: %1").arg(err));
+                return;
+            }
+            const QString cur = reply.value("current_state").toString();
+            const QString err = reply.value("error").toString();
+            const QJsonArray hist = reply.value("state_history").toArray();
+
+            // Mark every state in history as done.
+            for (const QJsonValue &v : hist) {
+                const QString sid = v.toObject().value("state").toString();
+                if (!sid.isEmpty()) flow_widget_->markFinished(sid);
+            }
+            if (!cur.isEmpty()) flow_widget_->setCurrentState(cur);
+            if (!err.isEmpty()) {
+                flow_widget_->markError(cur, err);
+                flow_status_label_->setText(QString("失败 @ %1 : %2").arg(cur, err));
+            } else {
+                const QString sub = reply.value("sub_progress").toString();
+                flow_status_label_->setText(
+                    QString("运行中 · %1%2")
+                       .arg(cur)
+                       .arg(sub.isEmpty() ? "" : QString(" · %1").arg(sub)));
+            }
+        });
+}
+
+void Tab4TaskConfig::onFlowStationClicked(QString state_id)
+{
+    // Future: jump-to-step / inspect detail panel. For now just log it.
+    for (const auto &s : TaskFlowWidget::states()) {
+        if (s.id == state_id) {
+            appendLog("info", QString("点击节点: %1 (%2)").arg(s.label, s.desc));
+            return;
+        }
+    }
+}
+

@@ -13,8 +13,10 @@ class QPushButton;
 class QSplitter;
 class QThread;
 class QSlider;
+class QRadioButton;
 class ArmViewer3D;
 class ArmSyncWorker;
+class TaskFlowWidget;
 
 // Task Configuration Tab
 // Layout:
@@ -45,6 +47,17 @@ private slots:
     void onSimulateTask();
     void onSimReturnToLive();
     void onSimTick();
+
+    // Battery-swap pipeline (the metro-style flow chart on the right).
+    // Two modes: simulation (3D-only, lerps joints between station poses)
+    // and real (polls swap.get_state from proc_battery_swap).
+    void onFlowModeChanged();
+    void onFlowStart();
+    void onFlowStop();
+    void onFlowReset();
+    void onFlowSimTick();             // 30 Hz interpolation when sim is running
+    void onSwapStatusPoll();          // 2 Hz polling in real mode
+    void onFlowStationClicked(QString state_id);
 
 private:
     void buildUi();
@@ -90,6 +103,29 @@ private:
     double       sim_t0_ms_       = 0.0;
     bool         sim_mode_active_ = false;
     QVector<QPair<float, QVector<float>>> sim_traj_;
+
+    // ── Battery-swap flow pipeline (right pane) ──────────────────────────
+    TaskFlowWidget *flow_widget_      = nullptr;
+    QRadioButton   *mode_sim_radio_   = nullptr;
+    QRadioButton   *mode_real_radio_  = nullptr;
+    QPushButton    *btn_flow_start_   = nullptr;
+    QPushButton    *btn_flow_stop_    = nullptr;
+    QPushButton    *btn_flow_reset_   = nullptr;
+    QLabel         *flow_status_label_= nullptr;
+
+    // Flow simulator (sim mode) — lerps J1..J6 between station demo poses
+    // and advances through the 24-state pipeline.
+    QTimer        *flow_sim_timer_       = nullptr;   // 30 Hz interp tick
+    int            flow_sim_state_idx_   = -1;        // -1 = not running
+    QVector<float> flow_sim_start_joints_;
+    QVector<float> flow_sim_target_joints_;
+    qint64         flow_sim_step_start_ms_ = 0;
+    int            flow_sim_step_dur_ms_   = 1500;    // per-state animation
+
+    // Real-mode polling of proc_battery_swap.
+    QTimer        *swap_poll_timer_      = nullptr;
+    bool           flow_running_         = false;
+    bool           flow_simulating_      = false;
 };
 
 #endif // TAB4TASKCONFIG_H
