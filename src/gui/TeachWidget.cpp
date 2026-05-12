@@ -403,11 +403,15 @@ void TeachWidget::executeStep(int idx)
     p[Protocol::Fields::JOINTS] = j;
     rpc_->call(Protocol::Methods::ARM_MOVE_JOINTS, p);
 
-    // 2. gripper command (if state changed)
+    // 2. gripper command (if state changed). proc_piper's
+    // piper.set_gripper_angle expects "angle_mm" + "effort_mNm". The
+    // stored gripper_angle is treated as mm (0=closed, ~70=fully open
+    // on Piper hardware); gripper_force_pct (0-100) maps to mN·m via
+    // ×20 (100% → 2000 mN·m, plenty for any real grasp).
     if (w.gripper_state != GripperUnchanged) {
         QJsonObject g;
-        g["angle"]     = w.gripper_angle;
-        g["force_pct"] = w.gripper_force_pct;     // backend honours if it understands
+        g["angle_mm"]   = double(w.gripper_angle);
+        g["effort_mNm"] = double(w.gripper_force_pct) * 20.0;
         rpc_->call(Protocol::Methods::PIPER_SET_GRIPPER_ANGLE, g);
     }
 
