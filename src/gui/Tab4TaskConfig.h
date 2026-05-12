@@ -18,6 +18,7 @@ class QRadioButton;
 class ArmViewer3D;
 class ArmSyncWorker;
 class TaskFlowWidget;
+struct TaskStep;
 
 // Task Configuration Tab
 // Layout:
@@ -68,6 +69,7 @@ private slots:
     void onFlowSimTick();             // 30 Hz interpolation when sim is running
     void onSwapStatusPoll();          // 2 Hz polling in real mode
     void onFlowStationClicked(QString state_id);
+    void onStageConfigClicked(QString stage_id);   // ⚙ on TaskFlowWidget card
 
     // 单步调试模式: 流程图上选一张卡片(stage), "执行选中" 把该 stage 下
     // 所有 sub-state 依次通过 arm.move_joints 发到真机, 1.5 秒每一步.
@@ -152,6 +154,17 @@ private:
     QTimer        *swap_poll_timer_      = nullptr;
     bool           flow_running_         = false;
     bool           flow_simulating_      = false;
+
+    // ── Per-stage user-configured TaskStep scripts (loaded from
+    //    user home on construction, saved on dialog accept).
+    //    scripts_[stage_id] = QVector<TaskStep>
+    QHash<QString, QVector<TaskStep>> stage_scripts_;
+    // Sim-mode script execution state (when current stage has a
+    // configured script, we run its steps instead of the legacy
+    // single-pose interpolation).
+    int     flow_script_step_idx_  = -1;     // -1 = not in script mode
+    qint64  flow_script_step_start_ms_ = 0;
+    int     flow_script_step_dur_ms_   = 1500;
 };
 
 #endif // TAB4TASKCONFIG_H

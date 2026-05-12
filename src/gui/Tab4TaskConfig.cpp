@@ -3,11 +3,14 @@
 #include "ArmViewer3D.h"
 #include "ArmSyncWorker.h"
 #include "TaskFlowWidget.h"
+#include "TaskStep.h"
+#include "StageConfigDialog.h"
 #include "core/RpcClient.h"
 #include "core/Protocol.h"
 
 #include <QRadioButton>
 #include <QButtonGroup>
+#include <QMessageBox>
 
 #include <QVBoxLayout>
 #include <QHBoxLayout>
@@ -431,6 +434,24 @@ QWidget* Tab4TaskConfig::buildTaskPanel()
     connect(btn_estop_,      &QPushButton::clicked,   this, &Tab4TaskConfig::onEstopTask);
     connect(flow_widget_,    &TaskFlowWidget::stationClicked,
             this,            &Tab4TaskConfig::onFlowStationClicked);
+    connect(flow_widget_,    &TaskFlowWidget::stageConfigClicked,
+            this,            &Tab4TaskConfig::onStageConfigClicked);
+
+    // Load any previously-saved per-stage TaskStep scripts from the
+    // operator's user-config directory. This is the persistent script
+    // store that StageConfigDialog reads/writes.
+    {
+        TaskConfig cfg = TaskConfig::loadFromHomeFile();
+        stage_scripts_ = cfg.scripts;
+        int total = 0;
+        for (const auto &v : stage_scripts_) total += v.size();
+        if (total > 0) {
+            appendLog("info", QString("[stages] loaded %1 step(s) across %2 stage(s) from %3")
+                                  .arg(total)
+                                  .arg(stage_scripts_.size())
+                                  .arg(TaskConfig::homeFilePath()));
+        }
+    }
 
     // ── Timers ──────────────────────────────────────────────────────────
     flow_sim_timer_ = new QTimer(this);
@@ -790,8 +811,48 @@ void Tab4TaskConfig::onFlowSimTick()
         flow_sim_state_idx_++;
         flow_sim_start_joints_   = flow_sim_target_joints_;
         flow_sim_target_joints_  = states[flow_sim_state_idx_].demo_joints_deg;
+
+        // ── Per-stage configured-script overlay ─────────────────────
+        // If the operator recorded a TaskStep script for the stage this
+        // new state belongs to, replace the demo joint target with the
+        // i-th MOVE_JOINTS step from the script (where i = position of
+        // this fine-grained state within the stage). That way "点仿真"
+        // actually walks the arm through the recorded waypoints
+        // instead of the canned demo poses.
+        const QString new_state_id = states[flow_sim_state_idx_].id;
+        const QString stage_id     = TaskFlowWidget::stageOfState(new_state_id);
+        if (!stage_id.isEmpty() && stage_scripts_.contains(stage_id)) {
+            const QVector<QString> stage_states = TaskFlowWidget::statesInStage(stage_id);
+            const int pos_in_stage = stage_states.indexOf(new_state_id);
+            // Collect just the MOVE_JOINTS steps from the script, in order.
+            const auto &script = stage_scripts_[stage_id];
+            QVector<int> mj_step_indices;
+            for (int si = 0; si < script.size(); ++si) {
+                if (script[si].type == StepType::MOVE_JOINTS) mj_step_indices.append(si);
+            }
+            if (pos_in_stage >= 0 && pos_in_stage < mj_step_indices.size()) {
+                const TaskStep &s = script[mj_step_indices[pos_in_stage]];
+                const QVariantList j = s.params.value("joints").toList();
+                if (j.size() == 6) {
+                    QVector<float> override_target(6);
+                    for (int i = 0; i < 6; ++i) override_target[i] = float(j[i].toDouble());
+                    flow_sim_target_joints_ = override_target;
+                    // Also scale step duration by inverse of speed_ratio
+                    // (slower script speed → longer animation segment).
+                    const double sr = s.params.value("speed_ratio", 0.3).toDouble();
+                    if (sr > 0.0) flow_sim_step_dur_ms_ = int(1500.0 / sr * 0.3);
+                }
+            }
+            // Log script presence the first time we see this stage in a run
+            // (i.e., when entering its first state).
+            if (pos_in_stage == 0) {
+                appendLog("info", QString("[sim] 进入 stage %1 (含 %2 步配置)")
+                                       .arg(stage_id).arg(script.size()));
+            }
+        }
+
         flow_sim_step_start_ms_  = now_ms;
-        flow_widget_->setCurrentState(states[flow_sim_state_idx_].id);
+        flow_widget_->setCurrentState(new_state_id);
         flow_status_label_->setText(QString("模拟运行 · %1/%2 · %3")
                                        .arg(flow_sim_state_idx_ + 1)
                                        .arg(states.size())
@@ -995,3 +1056,46 @@ void Tab4TaskConfig::onFlowStepSkip()
         QString("已跳过 [%1] · 选下一张卡片继续").arg(flow_step_selected_stage_));
 }
 
+
+// ════════════════════════════════════════════════════════════════════════
+// ⚙ Configure stage: open StageConfigDialog, save accepted result to the
+// in-memory map AND write the whole bundle out to the user-home JSON.
+// ════════════════════════════════════════════════════════════════════════
+void Tab4TaskConfig::onStageConfigClicked(QString stage_id)
+{
+    if (flow_running_) {
+        QMessageBox::warning(this, QStringLiteral("配置中"),
+                              QStringLiteral("流程运行中, 请先停止再配置 stage"));
+        return;
+    }
+
+    // Look up stage title for the dialog header (purely cosmetic).
+    QString title = stage_id;
+    for (const auto &st : TaskFlowWidget::stages()) {
+        if (st.id == stage_id) { title = st.title; break; }
+    }
+
+    const QVector<TaskStep> existing = stage_scripts_.value(stage_id);
+
+    StageConfigDialog dlg(stage_id, title, existing, rpc_, this);
+    if (dlg.exec() != QDialog::Accepted) return;
+
+    stage_scripts_[stage_id] = dlg.steps();
+
+    // Persist the entire 9-stage bundle on every accept — cheap, atomic
+    // via QSaveFile, and means we never lose work if HostGUI crashes.
+    TaskConfig cfg;
+    cfg.scripts = stage_scripts_;
+    if (!cfg.saveToHomeFile()) {
+        appendLog("error",
+            QString("[stages] 保存失败: %1").arg(TaskConfig::homeFilePath()));
+        QMessageBox::warning(this, QStringLiteral("保存失败"),
+                              QStringLiteral("写入 %1 失败").arg(TaskConfig::homeFilePath()));
+        return;
+    }
+    appendLog("info",
+        QString("[stages] %1 步骤已保存到 %2 (%3 步)")
+            .arg(stage_id)
+            .arg(TaskConfig::homeFilePath())
+            .arg(stage_scripts_[stage_id].size()));
+}

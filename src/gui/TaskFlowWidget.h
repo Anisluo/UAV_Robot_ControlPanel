@@ -110,6 +110,11 @@ signals:
     // sim runner can jump to that step.
     void stationClicked(QString state_id);
 
+    // Fires when the operator clicks the small ⚙ gear icon in a stage
+    // card's top-right corner. stage_id matches TaskStage::id. Tab4
+    // catches this to open StageConfigDialog for that stage.
+    void stageConfigClicked(QString stage_id);
+
 protected:
     void paintEvent(QPaintEvent *event) override;
     void mousePressEvent(QMouseEvent *event) override;
@@ -129,6 +134,7 @@ private:
     // Cached card geometry per stage (recomputed on resize).
     struct StageGeom {
         QRectF card_rect;
+        QRectF gear_rect;              // hit box for the ⚙ button in title bar
         QVector<QRectF> signal_rects;  // one per signal in stage.signals
     };
 
@@ -151,6 +157,7 @@ private:
     QRectF             block2_rect_;   // 装电池 frame
     int      hover_card_  = -1;
     int      hover_sig_   = -1;
+    int      hover_gear_  = -1;       // card index whose ⚙ is hovered, -1 = none
     QTimer  *pulse_timer_ = nullptr;
     int      pulse_phase_ = 0;     // 0..359, animates Active glow
 };

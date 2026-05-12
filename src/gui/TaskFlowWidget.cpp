@@ -503,6 +503,11 @@ void TaskFlowWidget::recomputeGeometry() {
                 (void)row_h;
                 StageGeom g;
                 g.card_rect = QRectF(x, y, kCardW, h);
+                // Small ⚙ hit box anchored to the top-right of the card's
+                // title bar. ~18×18, with 4 px inset from the card edge.
+                constexpr qreal kGearSz = 18.0;
+                g.gear_rect = QRectF(x + kCardW - kGearSz - 4, y + 4,
+                                      kGearSz, kGearSz);
                 g.signal_rects.resize(sl[idx].entries.size());
                 for (int k = 0; k < sl[idx].entries.size(); ++k) {
                     const qreal sy = y + kTitleH + kCardPad + k * kSignalH;
@@ -667,12 +672,55 @@ void TaskFlowWidget::paintEvent(QPaintEvent *) {
         f.setPointSize(10); f.setBold(true); p.setFont(f);
         p.setPen(QColor(0xd8, 0xe0, 0xf0));
         const QString head = QStringLiteral("%1  %2").arg(stage.number).arg(stage.title);
-        p.drawText(tr.adjusted(10, 0, -28, 0), Qt::AlignVCenter | Qt::AlignLeft, head);
+        // Reserve space on the right for both the pill + the ⚙ gear.
+        p.drawText(tr.adjusted(10, 0, -48, 0), Qt::AlignVCenter | Qt::AlignLeft, head);
 
+        // Stage-status pill (existing) — moved left a bit to make room for ⚙
         p.setPen(Qt::NoPen);
         p.setBrush(edge);
-        QRectF pill(tr.right() - 22, tr.center().y() - 6, 12, 12);
+        QRectF pill(tr.right() - 42, tr.center().y() - 6, 12, 12);
         p.drawEllipse(pill);
+
+        // ⚙ gear button (top-right of card) — draws inside g.gear_rect.
+        // Hover state brightens the icon; the hit-test logic in
+        // mousePressEvent fires stageConfigClicked() when clicked.
+        {
+            const QRectF &gr = g.gear_rect;
+            const bool hov = (hover_gear_ == i);
+            QColor gear_fg = hov ? QColor(0xff, 0xc7, 0x4d)        // hover: orange
+                                  : QColor(0xa8, 0xb5, 0xd0);       // idle: muted blue-grey
+            p.setRenderHint(QPainter::Antialiasing, true);
+            // Subtle background circle when hovered, makes the hit area visible.
+            if (hov) {
+                QColor bg(0xff, 0xc7, 0x4d, 50);
+                p.setPen(Qt::NoPen);
+                p.setBrush(bg);
+                p.drawEllipse(gr);
+            }
+            // 12-tooth gear glyph drawn as a small ring + 8 short radial
+            // teeth + center hole. Simple but recognisable at 18 px.
+            const QPointF center = gr.center();
+            const qreal outer = gr.width() * 0.45;
+            const qreal inner = gr.width() * 0.32;
+            const qreal hole  = gr.width() * 0.13;
+            p.setPen(QPen(gear_fg, 1.5));
+            p.setBrush(Qt::NoBrush);
+            // ring
+            p.drawEllipse(center, inner, inner);
+            // 8 teeth
+            for (int t = 0; t < 8; ++t) {
+                const double ang = t * (M_PI / 4.0);
+                const QPointF a(center.x() + inner * std::cos(ang),
+                                center.y() + inner * std::sin(ang));
+                const QPointF b(center.x() + outer * std::cos(ang),
+                                center.y() + outer * std::sin(ang));
+                p.drawLine(a, b);
+            }
+            // center hole
+            p.setBrush(gear_fg);
+            p.setPen(Qt::NoPen);
+            p.drawEllipse(center, hole, hole);
+        }
 
         // Signal rows
         f.setPointSize(8); f.setBold(false); p.setFont(f);
@@ -725,13 +773,24 @@ void TaskFlowWidget::paintEvent(QPaintEvent *) {
 // ────────────────────────────────────────────────────────────────────────
 
 void TaskFlowWidget::mousePressEvent(QMouseEvent *event) {
+    if (event->button() != Qt::LeftButton) return;
+    const QPointF p = event->position();
+
+    // ⚙ gear: hit-test FIRST so it works regardless of click_enabled_.
+    // The gear lives in the card's title bar, top-right corner; tapping
+    // it opens StageConfigDialog via the stageConfigClicked() signal.
+    for (int i = 0; i < geom_.size(); ++i) {
+        if (geom_[i].gear_rect.contains(p)) {
+            emit stageConfigClicked(stages()[i].id);
+            return;
+        }
+    }
+
     // 默认整个流程图是 read-only HMI 显示, 鼠标点击不触发任何动作 —
     // 避免操作员误碰 / 鼠标蹭过去触发执行. 只有 Tab4 切到单步模式时
     // setClickEnabled(true) 才允许点击选卡片.
     if (!click_enabled_) return;
-    if (event->button() != Qt::LeftButton) return;
 
-    const QPointF p = event->position();
     // 单步模式选中粒度 = 整张卡片. 只要点击命中 card_rect (包括标题栏 "1
     // 初始化" / "2 视觉定位" 等),就发出该卡片**第一个**子状态的 legacy
     // state_id; Tab4 那边会自动解析成 stage_id 并把整张卡片高亮 + 把该
@@ -758,24 +817,37 @@ void TaskFlowWidget::setClickEnabled(bool enabled) {
 
 void TaskFlowWidget::mouseMoveEvent(QMouseEvent *event) {
     const QPointF p = event->position();
-    int new_card = -1, new_sig = -1;
+    int new_card = -1, new_sig = -1, new_gear = -1;
     QString tip;
+    // ⚙ hover: gear hit boxes are tiny so check them first
     for (int i = 0; i < geom_.size(); ++i) {
-        if (!geom_[i].card_rect.contains(p)) continue;
-        new_card = i;
-        for (int k = 0; k < geom_[i].signal_rects.size(); ++k) {
-            if (geom_[i].signal_rects[k].contains(p)) {
-                new_sig = k;
-                tip = stages()[i].entries[k].label;
-                break;
-            }
+        if (geom_[i].gear_rect.contains(p)) {
+            new_gear = i;
+            tip = QStringLiteral("配置 stage: %1").arg(stages()[i].title);
+            break;
         }
-        if (new_sig < 0) tip = stages()[i].title;
-        break;
     }
-    if (new_card != hover_card_ || new_sig != hover_sig_) {
+    if (new_gear < 0) {
+        for (int i = 0; i < geom_.size(); ++i) {
+            if (!geom_[i].card_rect.contains(p)) continue;
+            new_card = i;
+            for (int k = 0; k < geom_[i].signal_rects.size(); ++k) {
+                if (geom_[i].signal_rects[k].contains(p)) {
+                    new_sig = k;
+                    tip = stages()[i].entries[k].label;
+                    break;
+                }
+            }
+            if (new_sig < 0) tip = stages()[i].title;
+            break;
+        }
+    }
+    if (new_card != hover_card_ || new_sig != hover_sig_ || new_gear != hover_gear_) {
         hover_card_ = new_card;
         hover_sig_  = new_sig;
+        hover_gear_ = new_gear;
+        // change cursor when hovering a gear so it's obviously clickable
+        setCursor((new_gear >= 0 || click_enabled_) ? Qt::PointingHandCursor : Qt::ArrowCursor);
         update();
     }
     if (!tip.isEmpty()) QToolTip::showText(event->globalPosition().toPoint(), tip, this);
