@@ -168,12 +168,16 @@ QWidget* MainWindow::buildDashboardTab()
     npu_widget_     = new NpuWidget(rpc_client_, rightContainer);
     arm_widget_     = new ArmWidget(rpc_client_, rightContainer);
     piper_widget_   = new PiperWidget(rpc_client_, rightContainer);
-    // Default state: show legacy arm widget; the system.get_backend probe
-    // in onRpcConnected() flips to PiperWidget if gateway reports piper.
-    piper_widget_->hide();
+    // Default state: show Piper widget (gen-2 is now the primary backend);
+    // the system.get_backend probe in onRpcConnected() flips to ArmWidget
+    // only when gateway reports the legacy ZDT CAN arm. Piper's gripper
+    // is built into the arm hardware, so the separate GripperWidget is
+    // hidden by default too and only re-shown for the legacy path.
+    arm_widget_->hide();
     ugv_widget_     = new UGVWidget(rpc_client_, rightContainer);
     airport_widget_ = new AirportWidget(rpc_client_, rightContainer);
     gripper_widget_ = new GripperWidget(rpc_client_, rightContainer);
+    gripper_widget_->hide();   // Piper has built-in gripper; legacy probe re-shows
     mesh_widget_    = new MeshMapWidget(rightContainer);
     drone_widget_   = new DroneWidget(rightContainer);
     drone_widget_->setDefaultTargetHost("192.168.1.101");
@@ -317,26 +321,29 @@ void MainWindow::onRpcConnected()
     // The gateway forwards system.get_backend → proc_piper (gen-2) or
     // returns {"backend":"legacy"} for the old proc_arm path. We swap
     // the visible arm widget accordingly. Default state (set in
-    // buildDashboardTab) shows ArmWidget; we only flip to PiperWidget
-    // on a confirmed "piper" response.
+    // buildDashboardTab) shows PiperWidget — gen-2 is the primary backend
+    // now — and we only fall back to ArmWidget on an explicit "legacy"
+    // response. Anything else (probe failure, unknown backend, gateway
+    // not yet upgraded to expose get_backend) keeps the default Piper UI,
+    // matching what the field deployment actually runs.
     rpc_client_->call(Protocol::Methods::SYSTEM_GET_BACKEND, QJsonObject{},
         [this](QJsonObject reply) {
-            const QString backend = reply.value("backend").toString("legacy").toLower();
-            const bool is_piper = (backend == "piper");
-            if (is_piper) {
+            const QString backend = reply.value("backend").toString("piper").toLower();
+            const bool is_legacy = (backend == "legacy");
+            if (is_legacy) {
+                if (piper_widget_)   piper_widget_->hide();
+                if (arm_widget_)     arm_widget_->show();
+                if (gripper_widget_) gripper_widget_->show();
+                if (arm_widget_)     arm_widget_->pushSpeeds();
+                if (log_widget_) onLogMessage("[backend] legacy proc_arm detected, showing ArmWidget");
+            } else {
                 if (arm_widget_)     arm_widget_->hide();
                 if (gripper_widget_) gripper_widget_->hide();   // Piper has built-in gripper
                 if (piper_widget_) {
                     piper_widget_->show();
                     piper_widget_->onRpcConnected();
                 }
-                if (log_widget_) onLogMessage("[backend] gen-2 piper detected, showing PiperWidget");
-            } else {
-                if (piper_widget_)   piper_widget_->hide();
-                if (arm_widget_)     arm_widget_->show();
-                if (gripper_widget_) gripper_widget_->show();
-                if (arm_widget_)     arm_widget_->pushSpeeds();
-                if (log_widget_) onLogMessage("[backend] legacy proc_arm detected, showing ArmWidget");
+                if (log_widget_) onLogMessage("[backend] gen-2 piper (default), showing PiperWidget");
             }
         });
 

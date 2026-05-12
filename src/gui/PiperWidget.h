@@ -17,6 +17,8 @@ class QTabWidget;
 class QGroupBox;
 class QSettings;
 class ArmViewer3D;
+class ArmSyncWorker;
+class QThread;
 
 // PiperWidget — gen-2 arm control panel for the AgileX Piper 6-DOF arm.
 //
@@ -137,6 +139,14 @@ private:
     ArmViewer3D  *viewer_3d_     = nullptr;
     QLabel       *pose_readout_  = nullptr;
     std::array<QLabel*, 6> joint_readouts_ {};
+
+    // 3D model loader (runs ArmSyncWorker::loadAssets off the GUI thread
+    // so the 9 MB of Piper STLs don't freeze the UI on startup). We only
+    // use the worker for asset loading — the live joint angles are pushed
+    // directly from pollJointsAndPose() into viewer_3d_->setJointAngles(),
+    // so we don't run the worker's startAnglePolling path.
+    QThread        *sim_thread_  = nullptr;
+    ArmSyncWorker  *sim_worker_  = nullptr;
 
     // status bar
     QLabel       *status_ctrl_   = nullptr;

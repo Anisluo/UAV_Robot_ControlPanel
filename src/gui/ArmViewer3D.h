@@ -54,6 +54,18 @@ public slots:
     // Useful for verifying joint_origins by eye.
     void setShowJointMarkers(bool on);
 
+    // End-effector pose for the HUD readout (mm + deg). Push from the
+    // owning widget whenever it polls arm.get_pose.
+    void setEndEffectorPose(float x_mm, float y_mm, float z_mm,
+                            float rx_deg, float ry_deg, float rz_deg);
+
+    // Show / hide the world-frame XYZ axis triad rooted at scene origin.
+    void setShowAxesTriad(bool on);
+
+    // Show / hide the top-left pose + joint readout HUD (X/Y/Z/RX/RY/RZ
+    // + J1..J6, monospace, mirrors AgileX ArmRobotUA.exe layout).
+    void setShowPoseHud(bool on);
+
 signals:
     // UI thread signals into the loader thread — see ArmSyncWorker.
     void requestReload();

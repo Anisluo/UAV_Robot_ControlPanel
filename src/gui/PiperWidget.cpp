@@ -1,8 +1,14 @@
 #include "PiperWidget.h"
 
 #include "ArmViewer3D.h"
+#include "ArmSyncWorker.h"
 #include "../core/Protocol.h"
 #include "../core/RpcClient.h"
+
+#include <QCoreApplication>
+#include <QDir>
+#include <QThread>
+#include <QVector3D>
 
 #include <QHBoxLayout>
 #include <QVBoxLayout>
@@ -63,7 +69,13 @@ PiperWidget::PiperWidget(RpcClient *rpc, QWidget *parent)
     connect(poll_status_timer_, &QTimer::timeout, this, &PiperWidget::pollStatus);
 }
 
-PiperWidget::~PiperWidget() = default;
+PiperWidget::~PiperWidget()
+{
+    if (sim_thread_) {
+        sim_thread_->quit();
+        sim_thread_->wait(2000);
+    }
+}
 
 
 // ════════════════════════════════════════════════════════════════════════
@@ -303,22 +315,54 @@ void PiperWidget::buildRightPanel() {
     viewer_3d_->setMinimumHeight(280);
     vbox->addWidget(viewer_3d_, /*stretch=*/2);
 
-    // Readouts
-    auto *grp = new QGroupBox("实时反馈", right);
-    auto *form = new QFormLayout(grp);
-    form->setLabelAlignment(Qt::AlignRight);
+    // ── Spin up ArmSyncWorker just for asset loading ──────────────────
+    // Reads assets/arm_model/arm_model.json + the 10 Piper STLs off the
+    // GUI thread (≈9 MB total), then emits configReady / meshReady to
+    // populate viewer_3d_. We don't call startAnglePolling — joint
+    // angles are pushed in directly from pollJointsAndPose() below.
+    sim_thread_ = new QThread(this);
+    sim_thread_->setObjectName("PiperSim");
+    sim_worker_ = new ArmSyncWorker();
+    sim_worker_->moveToThread(sim_thread_);
+    connect(sim_thread_, &QThread::finished, sim_worker_, &QObject::deleteLater);
 
-    pose_readout_ = new QLabel("—", grp);
-    pose_readout_->setStyleSheet("font-family:monospace;");
-    form->addRow("末端:", pose_readout_);
+    connect(sim_worker_, &ArmSyncWorker::configReady, this,
+            [this](const QVector<QVector3D> &axes,
+                   const QVector<QVector3D> &origins,
+                   const QVector3D           &center,
+                   float                      radius) {
+                ArmViewer3D::Config cfg;
+                cfg.joint_axes    = axes;
+                cfg.joint_origins = origins;
+                cfg.scene_center  = center;
+                cfg.scene_radius  = radius;
+                if (viewer_3d_) viewer_3d_->setConfig(cfg);
+            });
+    connect(sim_worker_, &ArmSyncWorker::meshReady,
+            viewer_3d_,   &ArmViewer3D::addMeshCPU);
 
-    for (int i = 0; i < 6; ++i) {
-        joint_readouts_[i] = new QLabel("—", grp);
-        joint_readouts_[i]->setStyleSheet("font-family:monospace;");
-        form->addRow(QString("J%1:").arg(i + 1), joint_readouts_[i]);
+    sim_thread_->start();
+
+    // Try the deployed location first (next to the exe), then fall back
+    // to the source tree so dev builds straight from build_win/ also work.
+    const QString exeDir = QCoreApplication::applicationDirPath();
+    QDir          d(exeDir);
+    QString       model_dir = d.absoluteFilePath("assets/arm_model");
+    if (!QDir(model_dir).exists("arm_model.json")) {
+        d.cdUp(); d.cdUp();
+        model_dir = d.absoluteFilePath("assets/arm_model");
     }
+    QMetaObject::invokeMethod(sim_worker_, "loadAssets",
+                              Qt::QueuedConnection,
+                              Q_ARG(QString, model_dir));
 
-    vbox->addWidget(grp, /*stretch=*/1);
+    // The pose + joint readouts that used to live in a "实时反馈" group
+    // here are now drawn directly on top of the 3D viewer (HUD overlay
+    // — see ArmViewer3D::setEndEffectorPose + paintGL), which means the
+    // dashboard real estate that group occupied is freed up and the X/Y/Z
+    // numbers sit right next to the model where they belong. The QLabel
+    // pointers stay null so any leftover updater calls are skipped via
+    // the early-return guards in updatePoseReadouts / updateJointReadouts.
     right->setMinimumWidth(280);
 }
 
@@ -459,6 +503,13 @@ void PiperWidget::pollJointsAndPose() {
                 for (int i = 0; i < 6; ++i) p[i] = arr.at(i).toDouble();
                 live_pose_ = p;
                 updatePoseReadouts(p);
+                // Mirror into the 3D viewer's HUD so X/Y/Z/RX/RY/RZ stay
+                // in sync with the form-row readouts on the right panel.
+                if (viewer_3d_) {
+                    viewer_3d_->setEndEffectorPose(
+                        float(p[0]), float(p[1]), float(p[2]),
+                        float(p[3]), float(p[4]), float(p[5]));
+                }
             }
         });
 }
@@ -592,10 +643,14 @@ void PiperWidget::onGripperCloseClicked() {
 // UI updaters
 // ════════════════════════════════════════════════════════════════════════
 void PiperWidget::updateJointReadouts(const std::array<double, 6> &deg) {
+    // The right-panel form-row labels were removed (now drawn as HUD on the
+    // 3D viewer), but guard against any leftover pointer just in case.
     for (int i = 0; i < 6; ++i) {
-        joint_readouts_[i]->setText(QString("%1°").arg(deg[i], 7, 'f', 2));
+        if (joint_readouts_[i])
+            joint_readouts_[i]->setText(QString("%1°").arg(deg[i], 7, 'f', 2));
     }
-    // Push live angles to ArmViewer3D
+    // Push live angles to ArmViewer3D — the viewer animates the chain
+    // AND shows J1..J6 in its HUD using these same values.
     if (viewer_3d_) {
         QVector<float> v(6);
         for (int i = 0; i < 6; ++i) v[i] = float(deg[i]);
@@ -604,13 +659,17 @@ void PiperWidget::updateJointReadouts(const std::array<double, 6> &deg) {
 }
 
 void PiperWidget::updatePoseReadouts(const std::array<double, 6> &p) {
-    pose_readout_->setText(QString("X=%1 Y=%2 Z=%3 mm  RX=%4 RY=%5 RZ=%6°")
-                              .arg(p[0], 7, 'f', 1)
-                              .arg(p[1], 7, 'f', 1)
-                              .arg(p[2], 7, 'f', 1)
-                              .arg(p[3], 6, 'f', 1)
-                              .arg(p[4], 6, 'f', 1)
-                              .arg(p[5], 6, 'f', 1));
+    // pose_readout_ label was removed in favour of the 3D viewer's HUD
+    // (setEndEffectorPose is called separately from pollJointsAndPose).
+    if (pose_readout_) {
+        pose_readout_->setText(QString("X=%1 Y=%2 Z=%3 mm  RX=%4 RY=%5 RZ=%6°")
+                                  .arg(p[0], 7, 'f', 1)
+                                  .arg(p[1], 7, 'f', 1)
+                                  .arg(p[2], 7, 'f', 1)
+                                  .arg(p[3], 6, 'f', 1)
+                                  .arg(p[4], 6, 'f', 1)
+                                  .arg(p[5], 6, 'f', 1));
+    }
 }
 
 void PiperWidget::updateStatusBar(int ctrl_mode, int arm_status, int /*mode_feed*/,

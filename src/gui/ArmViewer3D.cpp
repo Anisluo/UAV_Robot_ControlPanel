@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <vector>
 
 // ── GPU-side mesh — stays out of the public header so moc doesn't trip
@@ -46,8 +47,16 @@ struct ArmViewer3D::Impl : public QOpenGLFunctions_3_3_Core {
     QPoint  last_mouse;
 
     bool    initialized  = false;
-    bool    show_markers = true;
+    bool    show_markers = false;  // J1..J6 cross markers (debug)
+    bool    show_axes    = true;   // world-frame X/Y/Z arrows at origin
+    bool    show_hud     = true;   // top-left pose + joint readout
     QString status_text;
+
+    // End-effector pose for HUD (mm + deg). Pushed via setEndEffectorPose;
+    // owning widget calls that whenever it polls arm.get_pose.
+    float   pose_xyz[3]  = {0.0F, 0.0F, 0.0F};
+    float   pose_rpy[3]  = {0.0F, 0.0F, 0.0F};
+    bool    pose_valid   = false;
 };
 
 // ── Shaders ──────────────────────────────────────────────────────────────
@@ -136,6 +145,24 @@ void ArmViewer3D::setJointAngles(const QVector<float> &degrees) {
 
 void ArmViewer3D::setStatusText(const QString &text) {
     d_->status_text = text;
+    update();
+}
+
+void ArmViewer3D::setEndEffectorPose(float x_mm, float y_mm, float z_mm,
+                                      float rx_deg, float ry_deg, float rz_deg) {
+    d_->pose_xyz[0] = x_mm;  d_->pose_xyz[1] = y_mm;  d_->pose_xyz[2] = z_mm;
+    d_->pose_rpy[0] = rx_deg; d_->pose_rpy[1] = ry_deg; d_->pose_rpy[2] = rz_deg;
+    d_->pose_valid = true;
+    update();
+}
+
+void ArmViewer3D::setShowAxesTriad(bool on) {
+    d_->show_axes = on;
+    update();
+}
+
+void ArmViewer3D::setShowPoseHud(bool on) {
+    d_->show_hud = on;
     update();
 }
 
@@ -265,20 +292,98 @@ void ArmViewer3D::paintGL() {
     d_->prog.release();
 
     // Joint-origin gizmos + status HUD overlay (single QPainter pass).
-    if (d_->show_markers || !d_->status_text.isEmpty()) {
+    if (d_->show_markers || d_->show_axes || d_->show_hud ||
+        !d_->status_text.isEmpty()) {
         QPainter p(this);
         p.setRenderHint(QPainter::Antialiasing);
         QFont f = p.font();
         f.setFamily("Consolas");
         f.setPointSize(9);
         p.setFont(f);
+        const QMatrix4x4 vp = proj * view;
+
+        // ── World-frame XYZ axis triad at origin ──────────────────────
+        // Projects origin + (axis_len, 0, 0) etc. to screen, draws a
+        // coloured arrow + R/G/B label at each tip (matches AgileX
+        // ArmRobotUA.exe's visual convention).
+        if (d_->show_axes) {
+            const float axis_len = d_->config.scene_radius * 0.6F;
+            auto project = [&](const QVector3D &w) {
+                QVector4D c = vp * QVector4D(w, 1.0F);
+                if (c.w() <= 0.001F) return QPoint(-9999, -9999);
+                return QPoint(
+                    int(( c.x() / c.w() * 0.5F + 0.5F) * width()),
+                    int((-c.y() / c.w() * 0.5F + 0.5F) * height()));
+            };
+            const QPoint o_px = project(QVector3D(0, 0, 0));
+            static const struct { QVector3D dir; QColor col; const char *lbl; } kAxes[3] = {
+                { QVector3D(1,0,0), QColor(0xff,0x40,0x40), "X" },
+                { QVector3D(0,1,0), QColor(0x40,0xc8,0x40), "Y" },
+                { QVector3D(0,0,1), QColor(0x60,0x80,0xff), "Z" },
+            };
+            for (int k = 0; k < 3; ++k) {
+                const QPoint tip = project(kAxes[k].dir * axis_len);
+                if (tip.x() < -1000 || o_px.x() < -1000) continue;
+                QPen pen(kAxes[k].col); pen.setWidth(3);
+                p.setPen(pen); p.setBrush(kAxes[k].col);
+                p.drawLine(o_px, tip);
+                // Tiny arrowhead at the tip — square dot keeps it simple.
+                p.drawEllipse(tip, 4, 4);
+                p.setPen(QColor(0,0,0,200));
+                p.drawText(tip.x()+9, tip.y()-7, kAxes[k].lbl);
+                p.drawText(tip.x()+7, tip.y()-7, kAxes[k].lbl);
+                p.drawText(tip.x()+8, tip.y()-8, kAxes[k].lbl);
+                p.drawText(tip.x()+8, tip.y()-6, kAxes[k].lbl);
+                p.setPen(kAxes[k].col);
+                p.drawText(tip.x()+8, tip.y()-7, kAxes[k].lbl);
+            }
+        }
+
+        // ── Top-left pose + joint readout HUD ─────────────────────────
+        // Mirrors ArmRobotUA.exe layout: X/Y/Z (mm), RX/RY/RZ (deg), and
+        // J1..J6 (deg) in monospace, slight rounded background.
+        if (d_->show_hud) {
+            QFont hudFont = f; hudFont.setPointSize(10); p.setFont(hudFont);
+            const int       lh = 18;
+            const int       lines = 6 + std::min<int>(6, int(d_->joint_angles.size()));
+            const int       pad = 8;
+            const int       boxX = 8, boxY = 8;
+            const int       boxW = 200;
+            const int       boxH = lh * lines + pad * 2 + 6;  // extra for separator gap
+            p.setPen(Qt::NoPen);
+            p.setBrush(QColor(0x10, 0x18, 0x28, 0xb0));
+            p.drawRoundedRect(boxX, boxY, boxW, boxH, 8, 8);
+            p.setPen(QColor(0xd0, 0xd8, 0xe8));
+            int y = boxY + pad + 12;
+            auto row = [&](const char *label, float v, const char *unit) {
+                p.setPen(QColor(0xa8, 0xb4, 0xc8));
+                p.drawText(boxX + pad,           y, QString::fromLatin1(label));
+                p.setPen(QColor(0xff, 0xff, 0xff));
+                p.drawText(boxX + pad + 56,      y, QStringLiteral("%1").arg(v, 8, 'f', 3));
+                p.setPen(QColor(0xa8, 0xb4, 0xc8));
+                p.drawText(boxX + pad + 130,     y, QString::fromLatin1(unit));
+                y += lh;
+            };
+            row("X:",  d_->pose_xyz[0], "mm");
+            row("Y:",  d_->pose_xyz[1], "mm");
+            row("Z:",  d_->pose_xyz[2], "mm");
+            row("RX:", d_->pose_rpy[0], "deg");
+            row("RY:", d_->pose_rpy[1], "deg");
+            row("RZ:", d_->pose_rpy[2], "deg");
+            y += 4;
+            const int n_show = std::min<int>(6, int(d_->joint_angles.size()));
+            for (int i = 0; i < n_show; ++i) {
+                char lbl[8]; std::snprintf(lbl, sizeof(lbl), "J%d:", i + 1);
+                row(lbl, d_->joint_angles[i], "deg");
+            }
+        }
 
         if (d_->show_markers) {
             // Project each joint's rotation centre to screen and draw a
             // coloured cross + label. Pivot is in world coords AFTER all
             // upstream joints have rotated, so we left-multiply
             // joint_origins[k] by the chain transform up to joint k-1.
-            const QMatrix4x4 vp = proj * view;
+            // (vp was computed at the top of the QPainter block.)
             static const QColor kMarkerColors[6] = {
                 QColor(0xff, 0x90, 0x40),
                 QColor(0x60, 0xa8, 0xff),
