@@ -9,6 +9,9 @@
 #include <QLabel>
 #include <QDateTime>
 #include <QScrollBar>
+#include <QTextDocument>
+#include <QTextCursor>
+#include <QTextBlock>
 #include <QTimer>
 #include <QJsonObject>
 
@@ -168,6 +171,18 @@ void LogWidget::appendLog(const QString &level, const QString &msg)
                    .arg(msg.toHtmlEscaped());
 
     log_edit_->appendHtml(html);
+
+    // Cap the document size so a long-running session doesn't end up with
+    // a 100 MB QTextEdit and a frozen GUI thread. Drop the oldest blocks
+    // when we exceed the limit. 2000 lines × ~160 bytes ≈ 320 KB cap.
+    QTextDocument *doc = log_edit_->document();
+    static constexpr int kMaxBlocks = 2000;
+    while (doc->blockCount() > kMaxBlocks) {
+        QTextCursor c(doc->firstBlock());
+        c.select(QTextCursor::BlockUnderCursor);
+        c.removeSelectedText();
+        c.deleteChar();    // remove the trailing newline left behind
+    }
 
     // Auto-scroll
     QScrollBar *sb = log_edit_->verticalScrollBar();

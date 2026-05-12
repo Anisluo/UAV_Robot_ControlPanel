@@ -81,9 +81,33 @@ void RpcClient::call(const QString &method,
 
     QByteArray data = QJsonDocument(req).toJson(QJsonDocument::Compact);
     data.append('\n');
-    emit logMessage("[RPC] TX " + QString::fromUtf8(data.trimmed()));
+    const bool quiet = isHighRatePollMethod(method);
+    if (quiet) {
+        quiet_ids_.insert(id);
+    } else {
+        emit logMessage("[RPC] TX " + QString::fromUtf8(data.trimmed()));
+    }
     socket_->write(data);
     socket_->flush();
+}
+
+bool RpcClient::isHighRatePollMethod(const QString &method)
+{
+    // These get fired 2–40 times a second by polling widgets. Logging
+    // every TX+RX would push ~170 entries/sec through LogWidget's
+    // QTextEdit::append() — a known GUI-thread hog. Suppress them by
+    // default; failures still go through (onError / Parse error /
+    // method-not-found error all bypass this).
+    static const QSet<QString> kQuiet = {
+        "arm.get_angles",
+        "arm.get_pose",
+        "arm.get_motor_angles",
+        "piper.get_status",
+        "npu.get_detections",
+        "system.ping",
+        "task.get_status",
+    };
+    return kQuiet.contains(method);
 }
 
 void RpcClient::onConnected()
@@ -113,10 +137,21 @@ void RpcClient::onReadyRead()
 
         if (line.isEmpty()) continue;
 
-        emit logMessage("[RPC] RX " + QString::fromUtf8(line));
-
+        // Peek at the id so we can suppress the RX log if it matches a
+        // high-rate poll TX we previously silenced. Errors still go
+        // through below.
         QJsonParseError err;
         QJsonDocument doc = QJsonDocument::fromJson(line, &err);
+        bool was_quiet = false;
+        if (err.error == QJsonParseError::NoError && doc.isObject()) {
+            const int rx_id = doc.object().value("id").toInt(-1);
+            if (rx_id >= 0 && quiet_ids_.remove(rx_id)) was_quiet = true;
+        }
+        // Real RPC-level errors are never silenced.
+        const bool is_error = line.contains("\"error\":{");
+        if (!was_quiet || is_error) {
+            emit logMessage("[RPC] RX " + QString::fromUtf8(line));
+        }
         if (err.error != QJsonParseError::NoError || !doc.isObject()) {
             emit logMessage("[RPC] Parse error: " + err.errorString());
             continue;
