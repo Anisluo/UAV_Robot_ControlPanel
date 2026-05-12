@@ -61,7 +61,10 @@ PiperWidget::PiperWidget(RpcClient *rpc, QWidget *parent)
     connectSignals();
 
     poll_state_timer_ = new QTimer(this);
-    poll_state_timer_->setInterval(50);          // 20 Hz
+    poll_state_timer_->setInterval(25);          // 40 Hz (proc_piper refreshes
+                                                 // its joint/pose cache at
+                                                 // 100 Hz, so going below 25 ms
+                                                 // would not see fresher data)
     connect(poll_state_timer_, &QTimer::timeout, this, &PiperWidget::pollJointsAndPose);
 
     poll_status_timer_ = new QTimer(this);
