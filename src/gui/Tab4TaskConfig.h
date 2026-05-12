@@ -33,6 +33,15 @@ public:
     void appendLog(const QString &level, const QString &msg);
     void setConnectionParams(const QString &host, quint16 rpc_port, quint16 vid_port);
 
+    // Camera-dock API. The HostGUI has a single CameraWidget that lives on
+    // the dashboard tab by default. When the user switches to this tab the
+    // top-level MainWindow reparents that widget into our `cam_dock_` slot
+    // (where the 3D-sim panel used to live), and moves it back on exit.
+    // The two pages never display video simultaneously — the same widget
+    // is shuttled between them.
+    void mountCamera(QWidget *cam);
+    void unmountCamera();
+
 private slots:
     void onStartTask();
     void onStopTask();
@@ -64,6 +73,7 @@ private:
     QWidget* build3DViewer();
     QWidget* buildTaskPanel();
     QWidget* buildSimPanel();
+    QWidget* buildCameraDock();      // replaces buildSimPanel() in the layout
     void updateStatusFromBackend(const QJsonObject &status);
 
     // Wires the sync worker: starts a QThread, asks worker to load STL
@@ -90,6 +100,10 @@ private:
     ArmViewer3D   *viewer_3d_   = nullptr;
     ArmSyncWorker *sim_worker_  = nullptr;
     QThread       *sim_thread_  = nullptr;
+
+    // Slot the dashboard's CameraWidget reparents into when the user is
+    // viewing this tab (replaces the old 3D-sim controls panel).
+    QWidget     *cam_dock_       = nullptr;
 
     // Standalone test controls — verify the 3D model animates without
     // needing the live arm or any RPC connection.

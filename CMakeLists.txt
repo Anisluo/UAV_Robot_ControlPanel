@@ -39,6 +39,12 @@ target_link_libraries(HostGUI PRIVATE
     Qt${QT_VERSION_MAJOR}::OpenGLWidgets
 )
 
+# Windows: link DWM API so MainWindow can flip its title bar to dark mode
+# via DwmSetWindowAttribute(DWMWA_USE_IMMERSIVE_DARK_MODE).
+if(WIN32)
+    target_link_libraries(HostGUI PRIVATE dwmapi)
+endif()
+
 # Copy arm_model assets next to the exe so runtime can find them without
 # the source tree. Idempotent — CMake checks mtimes.
 add_custom_command(TARGET HostGUI POST_BUILD

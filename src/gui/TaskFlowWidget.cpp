@@ -4,380 +4,705 @@
 #include <QPainterPath>
 #include <QPaintEvent>
 #include <QMouseEvent>
-#include <QLineF>
-#include <QRadialGradient>
+#include <QResizeEvent>
+#include <QFontMetricsF>
 #include <QtMath>
 #include <QToolTip>
-#include <cmath>
 
-namespace {
+// ════════════════════════════════════════════════════════════════════════
+// Static data — 9 stages + 24 fine-grained legacy states + mapping table
+// ════════════════════════════════════════════════════════════════════════
 
-// Single source of truth for the 24-state pipeline. Order matters — the
-// metro layout positions stations left→right in this sequence. demo_joints
-// is what the sim mode lerps toward when the state becomes "current"; you
-// can refine those numbers once real waypoints are recorded.
-//
-// Phase 1 (line 1) — pull old battery out of the drone and stow it.
-// Phase 2 (line 2) — fetch fresh battery from slot and load it into the drone.
-const QVector<TaskState>& canonicalStates() {
-    static const QVector<TaskState> S = {
-        // ── Phase 1: 取下旧电池入库 ─────────────────────────────────
+const QVector<TaskStage>& TaskFlowWidget::stages() {
+    static const QVector<TaskStage> kStages = {
+        // ── Phase 1 ──────────────────────────────────────────────────
+        {"INIT", "初始化",     1, 1, {
+            {"home_done",      "关节归零",      "—"},
+            {"monitor_ready",  "监视位姿",      "—"},
+        }},
+        {"VISION", "视觉定位", 2, 1, {
+            {"uav_centered",   "UAV 居中",     "—"},
+            {"uav_static",     "UAV 静止",     "—"},
+        }},
+        {"LOCK", "机场锁定",   3, 1, {
+            {"uav_landed",     "降落到位",      "—"},
+            {"airport_jaws",   "左右夹爪",      "—"},
+            {"lock_done",      "锁紧到位",      "—"},
+        }},
+        {"GRAB", "抓取电池",   4, 1, {
+            {"approach",       "接近到位",      "—"},
+            {"light_grip",     "轻夹电池",      "—"},
+            {"extract",        "抽出电池",      "—"},
+            {"firm_grip",      "重夹大力",      "—"},
+            {"airport_free",   "机场松开",      "—"},
+        }},
+        {"PLATFORM", "平台暂存", 5, 1, {
+            {"to_platform",    "搬到平台",      "—"},
+            {"head_aligned",   "调头夹住",      "—"},
+            {"insert_slot",    "插入电池槽",    "—"},
+            {"slot_released",  "夹爪松开",      "—"},
+        }},
+        // ── Phase 2 ──────────────────────────────────────────────────
+        {"FETCH", "取新电池",  6, 2, {
+            {"new_grabbed",    "从槽取出",      "—"},
+            {"on_platform",    "放回平台",      "—"},
+            {"tail_grip",      "夹住尾部",      "—"},
+        }},
+        {"HANDOFF", "送交机场", 7, 2, {
+            {"at_handoff",     "送到交接位",    "—"},
+            {"airport_catch",  "机场接住",      "—"},
+            {"arm_release",    "机械臂松开",    "—"},
+        }},
+        {"INSERT", "装入无人机", 8, 2, {
+            {"push_in",        "推入 UAV",     "—"},
+            {"seated",         "电池就位",      "—"},
+        }},
+        {"DONE", "完成",       9, 2, {
+            {"wait_takeoff",   "等待起飞",      "—"},
+            {"task_done",      "任务完成",      "—"},
+        }},
+    };
+    return kStages;
+}
+
+const QVector<TaskState>& TaskFlowWidget::states() {
+    static const QVector<TaskState> kStates = {
         {"HOME",            "归零",        "上电归零, 全部关节 0°",                1, {0,  0,   0,   0,  0, 0}},
-        {"MOVE_MONITOR",    "监视位",      "MoveJ 到对准机场的监视姿态, 摄像头朝向 UAV 降落区", 1, {0, 30, -60,   0, 30, 0}},
-        {"CENTERING",       "视觉居中",    "机械臂左右微动, 让 UAV 在摄像头中央",      1, {0, 30, -60,   0, 30, 0}},
-        {"DRONE_STATIC",    "等待静止",    "无人机桨叶停转 + 位置静止 N 秒",          1, {0, 30, -60,   0, 30, 0}},
-        {"AIRPORT_LOCK",    "机场夹紧",    "机场左右夹爪收拢 → 等堵转 → UAV 锁住",   1, {0, 32, -62,   0, 35, 0}},
-        {"APPROACH_DRONE",  "接近电池",    "MoveL 沿固定方向插入到电池抓取深度",       1, {-15, 40, -75, 0, 50, 0}},
-        {"GRAB_LIGHT",      "轻夹电池",    "piper 夹爪轻力夹住电池 (小力, 不变形)",   1, {-15, 40, -75, 0, 50, 0}},
-        {"EXTRACT",         "抽出电池",    "MoveL 反向直线退出, 把电池抽出来",         1, {-10, 35, -70, 0, 45, 0}},
-        {"REGRIP_FIRM",     "重夹大力",    "调整角度后用更大力度重新夹紧",             1, { -5, 30, -65, 0, 40, 0}},
-        {"AIRPORT_RELEASE", "机场松开",    "机场夹爪打开, 释放 UAV",                  1, { -5, 30, -65, 0, 40, 0}},
-        {"MOVE_TO_PLATFORM","搬到平台",    "MoveJ 把电池搬到平台安全位",               1, { 30, 35, -65, 0, 35, 0}},
-        {"ADJUST_HEAD",     "调头夹住",    "调整角度, 夹住电池头部",                   1, { 30, 35, -65, 0, 35, 0}},
-        {"INSERT_SLOT",     "插入电池槽",  "MoveL 直线插入电池槽",                     1, { 45, 40, -70, 0, 30, 0}},
-        {"RELEASE_IN_SLOT", "槽内松开",    "电池入位 → piper 夹爪打开",               1, { 45, 40, -70, 0, 30, 0}},
-
-        // ── Phase 2: 取新电池装回 ──────────────────────────────────
-        {"FETCH_NEW_BAT",   "取新电池",    "MoveJ 回电池槽, 夹住新电池头部",           2, { 45, 40, -70, 0, 30, 0}},
-        {"PLACE_PLATFORM",  "放回平台",    "MoveL 抽出 → 放在平台安全位",              2, { 30, 35, -65, 0, 35, 0}},
-        {"REGRIP_TAIL",     "夹住尾部",    "调整角度, 重新夹住电池尾部",               2, { 30, 35, -65, 0, 35, 0}},
-        {"MOVE_HANDOFF",    "送交接位",    "MoveJ 送到机场夹爪交接位置",               2, {  5, 32, -62, 0, 38, 0}},
-        {"AIRPORT_LOCK_NEW","机场接住",    "机场夹爪收拢 → 等堵转 → 接住新电池",      2, {  5, 32, -62, 0, 38, 0}},
+        {"MOVE_MONITOR",    "监视位",      "MoveJ 到对准机场的监视姿态",            1, {0, 30, -60,   0, 30, 0}},
+        {"CENTERING",       "视觉居中",    "机械臂左右微动, 让 UAV 在摄像头中央",   1, {0, 30, -60,   0, 30, 0}},
+        {"DRONE_STATIC",    "等待静止",    "无人机桨叶停转 + 位置静止 N 秒",        1, {0, 30, -60,   0, 30, 0}},
+        {"AIRPORT_LOCK",    "机场夹紧",    "机场左右夹爪收拢 → 等堵转 → UAV 锁住", 1, {0, 32, -62,   0, 35, 0}},
+        {"APPROACH_DRONE",  "接近电池",    "MoveL 沿固定方向插入到电池抓取深度",     1, {-15, 40, -75, 0, 50, 0}},
+        {"GRAB_LIGHT",      "轻夹电池",    "piper 夹爪轻力夹住电池",                 1, {-15, 40, -75, 0, 50, 0}},
+        {"EXTRACT",         "抽出电池",    "MoveL 反向直线退出, 把电池抽出来",       1, {-10, 35, -70, 0, 45, 0}},
+        {"REGRIP_FIRM",     "重夹大力",    "调整角度后用更大力度重新夹紧",            1, { -5, 30, -65, 0, 40, 0}},
+        {"AIRPORT_RELEASE", "机场松开",    "机场夹爪打开, 释放 UAV",                 1, { -5, 30, -65, 0, 40, 0}},
+        {"MOVE_TO_PLATFORM","搬到平台",    "MoveJ 把电池搬到平台安全位",              1, { 30, 35, -65, 0, 35, 0}},
+        {"ADJUST_HEAD",     "调头夹住",    "调整角度, 夹住电池头部",                  1, { 30, 35, -65, 0, 35, 0}},
+        {"INSERT_SLOT",     "插入电池槽",  "MoveL 直线插入电池槽",                    1, { 45, 40, -70, 0, 30, 0}},
+        {"RELEASE_IN_SLOT", "槽内松开",    "电池入位 → piper 夹爪打开",              1, { 45, 40, -70, 0, 30, 0}},
+        {"FETCH_NEW_BAT",   "取新电池",    "MoveJ 回电池槽, 夹住新电池头部",          2, { 45, 40, -70, 0, 30, 0}},
+        {"PLACE_PLATFORM",  "放回平台",    "MoveL 抽出 → 放在平台安全位",             2, { 30, 35, -65, 0, 35, 0}},
+        {"REGRIP_TAIL",     "夹住尾部",    "调整角度, 重新夹住电池尾部",              2, { 30, 35, -65, 0, 35, 0}},
+        {"MOVE_HANDOFF",    "送交接位",    "MoveJ 送到机场夹爪交接位置",              2, {  5, 32, -62, 0, 38, 0}},
+        {"AIRPORT_LOCK_NEW","机场接住",    "机场夹爪收拢 → 接住新电池",               2, {  5, 32, -62, 0, 38, 0}},
         {"ARM_RELEASE",     "机械臂松开",  "piper 夹爪打开 → 退离",                  2, {  5, 30, -60, 0, 35, 0}},
-        {"RETURN_MONITOR_2","回监视位",    "MoveJ 回到监视姿态",                      2, {  0, 30, -60, 0, 30, 0}},
-        {"AIRPORT_INSERT",  "推入无人机",  "机场夹爪把新电池推入 UAV",                 2, {  0, 30, -60, 0, 30, 0}},
+        {"AIRPORT_INSERT",  "推入无人机",  "机场夹爪把新电池推入 UAV",                2, {  0, 30, -60, 0, 30, 0}},
         {"WAIT_TAKEOFF",    "等待起飞",    "电池就位, 等 UAV 起飞确认",               2, {  0, 30, -60, 0, 30, 0}},
         {"DONE",            "完成",        "任务完成, 回 idle",                       2, {  0,  0,   0, 0,  0, 0}},
     };
-    return S;
+    return kStates;
 }
 
-}  // namespace
+namespace {
 
-
-const QVector<TaskState>& TaskFlowWidget::states() {
-    return canonicalStates();
+// Old fine-grained state id → (stage_id, signal_id). Ordering inside this
+// table also defines progression: when state X becomes Active, everything
+// before X in the table auto-marks Done.
+struct LegacyMap { const char *state; const char *stage; const char *signal; };
+static const QVector<LegacyMap> &legacyMap() {
+    static const QVector<LegacyMap> kMap = {
+        {"HOME",             "INIT",     "home_done"},
+        {"MOVE_MONITOR",     "INIT",     "monitor_ready"},
+        {"CENTERING",        "VISION",   "uav_centered"},
+        {"DRONE_STATIC",     "VISION",   "uav_static"},
+        {"AIRPORT_LOCK",     "LOCK",     "lock_done"},
+        {"APPROACH_DRONE",   "GRAB",     "approach"},
+        {"GRAB_LIGHT",       "GRAB",     "light_grip"},
+        {"EXTRACT",          "GRAB",     "extract"},
+        {"REGRIP_FIRM",      "GRAB",     "firm_grip"},
+        {"AIRPORT_RELEASE",  "GRAB",     "airport_free"},
+        {"MOVE_TO_PLATFORM", "PLATFORM", "to_platform"},
+        {"ADJUST_HEAD",      "PLATFORM", "head_aligned"},
+        {"INSERT_SLOT",      "PLATFORM", "insert_slot"},
+        {"RELEASE_IN_SLOT",  "PLATFORM", "slot_released"},
+        {"FETCH_NEW_BAT",    "FETCH",    "new_grabbed"},
+        {"PLACE_PLATFORM",   "FETCH",    "on_platform"},
+        {"REGRIP_TAIL",      "FETCH",    "tail_grip"},
+        {"MOVE_HANDOFF",     "HANDOFF",  "at_handoff"},
+        {"AIRPORT_LOCK_NEW", "HANDOFF",  "airport_catch"},
+        {"ARM_RELEASE",      "HANDOFF",  "arm_release"},
+        {"AIRPORT_INSERT",   "INSERT",   "push_in"},
+        {"WAIT_TAKEOFF",     "DONE",     "wait_takeoff"},
+        {"DONE",             "DONE",     "task_done"},
+    };
+    return kMap;
 }
 
+// Visual constants ──────────────────────────────────────────────────────
+constexpr int kMargin        = 12;
+constexpr int kCardW         = 190;
+constexpr int kTitleH        = 28;
+constexpr int kSignalH       = 22;
+constexpr int kCardPad       = 6;
+constexpr int kCardHGap      = 16;       // horizontal gap inside a block
+constexpr int kCardVGap      = 36;       // vertical gap between rows inside a block
+constexpr int kBlockPad      = 16;       // padding inside each phase block
+constexpr int kBlockGap      = 50;       // gap between block-1 and block-2
+constexpr int kBlockHeaderH  = 28;
+constexpr int kDotR          = 5;
+constexpr int kPhase1Cols    = 2;        // 取电池 layout: 2-col grid (2 + 2 + 1)
+constexpr int kPhase2Cols    = 2;        // 装电池 layout: 2-col grid (2 + 2)
 
-// ════════════════════════════════════════════════════════════════════════
-// Construction
-// ════════════════════════════════════════════════════════════════════════
-TaskFlowWidget::TaskFlowWidget(QWidget *parent)
-    : QWidget(parent) {
-    setMinimumSize(720, 280);
-    setMouseTracking(true);
-    setAttribute(Qt::WA_OpaquePaintEvent, false);
+// Draw a Bézier-curve arrow from `start` to `end`. The curve's control
+// points are nudged horizontally so adjacent same-row cards get a near-
+// straight line, while row-break / cross-block jumps get a soft S-curve.
+// `style_dashed` flips between solid and dashed (used for the cross-block
+// hop). An arrowhead is rendered at the endpoint tangent to the curve.
+void drawBezierArrow(QPainter &p, QPointF start, QPointF end,
+                     QColor col, bool style_dashed = false,
+                     bool vertical = false) {
+    const qreal dx = end.x() - start.x();
+    const qreal dy = end.y() - start.y();
+    const qreal absdx = std::abs(dx);
+    const qreal absdy = std::abs(dy);
+    QPointF c1, c2;
+    if (vertical) {
+        // Caller has chosen vertical exit/entry — push controls along Y so
+        // the arrow leaves the bottom edge straight down then curves into
+        // the top edge of the next card.
+        const qreal sy = (dy >= 0 ? 1 : -1) *
+                         std::max<qreal>(std::abs(dy) * 0.6, 30.0);
+        c1 = QPointF(start.x(), start.y() + sy);
+        c2 = QPointF(end.x(),   end.y()   - sy);
+    } else if (absdy < 8 && absdx > 0) {
+        // ~horizontal hop, mild belly so it doesn't look like a ruler
+        c1 = QPointF(start.x() + dx * 0.35, start.y());
+        c2 = QPointF(start.x() + dx * 0.65, end.y());
+    } else if (absdx < 8) {
+        // ~vertical hop
+        c1 = QPointF(start.x(),               start.y() + dy * 0.35);
+        c2 = QPointF(end.x(),                 start.y() + dy * 0.65);
+    } else {
+        // Diagonal / row-break — push controls strongly along the direction
+        // of the bigger dimension to keep the curve smooth.
+        const qreal sx = (dx > 0 ? 1 : -1) * std::max<qreal>(absdx * 0.55, 35.0);
+        c1 = QPointF(start.x() + sx, start.y());
+        c2 = QPointF(end.x()   - sx, end.y());
+    }
 
-    // Initialise all states to pending.
-    for (const auto &s : states()) status_[s.id] = StateStatus::Pending;
+    QPainterPath path;
+    path.moveTo(start);
+    path.cubicTo(c1, c2, end);
 
-    pulse_timer_ = new QTimer(this);
-    pulse_timer_->setInterval(40);     // ~25 fps glow
-    connect(pulse_timer_, &QTimer::timeout, this, &TaskFlowWidget::onPulseTick);
-    pulse_timer_->start();
+    QPen pen(col);
+    pen.setWidth(2);
+    pen.setCapStyle(Qt::RoundCap);
+    if (style_dashed) {
+        pen.setStyle(Qt::DashLine);
+        pen.setDashPattern({6, 5});
+    }
+    p.setPen(pen);
+    p.setBrush(Qt::NoBrush);
+    p.drawPath(path);
+
+    // Arrowhead: tangent direction from c2 → end
+    const QPointF d = end - c2;
+    const qreal len = std::hypot(d.x(), d.y());
+    if (len < 1e-3) return;
+    const qreal ux = d.x() / len, uy = d.y() / len;
+    constexpr qreal head = 9.0;
+    constexpr qreal wing = 0.45;     // radians, ≈26°
+    const QPointF a1(end.x() - head * (ux * std::cos(wing) - uy * std::sin(wing)),
+                     end.y() - head * (uy * std::cos(wing) + ux * std::sin(wing)));
+    const QPointF a2(end.x() - head * (ux * std::cos(-wing) - uy * std::sin(-wing)),
+                     end.y() - head * (uy * std::cos(-wing) + ux * std::sin(-wing)));
+    QPolygonF tri; tri << end << a1 << a2;
+    p.setPen(Qt::NoPen);
+    p.setBrush(col);
+    p.drawPolygon(tri);
 }
 
-
-// ════════════════════════════════════════════════════════════════════════
-// Public API — owner mutates visual state
-// ════════════════════════════════════════════════════════════════════════
-void TaskFlowWidget::setCurrentState(const QString &state_id) {
-    // Demote the previous "current" (if any) back to whatever its post-state was.
-    // We treat moving forward as implicitly marking the previous state Done,
-    // since the state machine on the backend only ever advances.
-    if (!current_.isEmpty() && current_ != state_id) {
-        if (status_.value(current_) == StateStatus::Current) {
-            status_[current_] = StateStatus::Done;
+QColor stateColor(SignalState s, int pulse_phase) {
+    switch (s) {
+        case SignalState::Pending: return QColor(0x6a, 0x71, 0x80);
+        case SignalState::Done:    return QColor(0x45, 0xcc, 0x7a);
+        case SignalState::Error:   return QColor(0xff, 0x52, 0x52);
+        case SignalState::Active: {
+            float t = 0.5f + 0.5f * std::cos(pulse_phase * float(M_PI) / 180.0f);
+            int  r = int(0x36 + (0x6a - 0x36) * t);
+            int  g = int(0x88 + (0xc8 - 0x88) * t);
+            int  b = int(0xee + (0xff - 0xee) * t);
+            return QColor(r, g, b);
         }
     }
-    current_ = state_id;
-    if (!state_id.isEmpty() && status_.value(state_id) != StateStatus::Error) {
-        status_[state_id] = StateStatus::Current;
+    return Qt::gray;
+}
+
+} // namespace
+
+// ════════════════════════════════════════════════════════════════════════
+
+TaskFlowWidget::TaskFlowWidget(QWidget *parent) : QWidget(parent) {
+    setMouseTracking(true);
+    setMinimumSize(900, 360);
+
+    pulse_timer_ = new QTimer(this);
+    pulse_timer_->setInterval(40);
+    connect(pulse_timer_, &QTimer::timeout, this, &TaskFlowWidget::onPulseTick);
+    pulse_timer_->start();
+
+    resetAll();
+}
+
+bool TaskFlowWidget::resolveState(const QString &state_id,
+                                   int *out_stage_idx, int *out_signal_idx) const {
+    for (const auto &m : legacyMap()) {
+        if (state_id == QLatin1String(m.state)) {
+            const auto &sl = stages();
+            for (int si = 0; si < sl.size(); ++si) {
+                if (sl[si].id == QLatin1String(m.stage)) {
+                    for (int xi = 0; xi < sl[si].entries.size(); ++xi) {
+                        if (sl[si].entries[xi].id == QLatin1String(m.signal)) {
+                            if (out_stage_idx)  *out_stage_idx  = si;
+                            if (out_signal_idx) *out_signal_idx = xi;
+                            return true;
+                        }
+                    }
+                }
+            }
+            return false;
+        }
+    }
+    return false;
+}
+
+void TaskFlowWidget::setCurrentState(const QString &state_id) {
+    int si = -1, xi = -1;
+    if (!resolveState(state_id, &si, &xi)) return;
+    current_state_ = state_id;
+
+    const auto &sl = stages();
+    for (int s = 0; s < sl.size(); ++s) {
+        for (int x = 0; x < sl[s].entries.size(); ++x) {
+            const bool before = (s < si) || (s == si && x < xi);
+            const bool here   = (s == si && x == xi);
+            const QString &stid = sl[s].id;
+            const QString &sgid = sl[s].entries[x].id;
+            auto &st = status_[stid][sgid];
+            if (here) {
+                st.state = SignalState::Active;
+                if (st.text.isEmpty()) st.text = QStringLiteral("进行中");
+            } else if (before) {
+                if (st.state != SignalState::Done && st.state != SignalState::Error) {
+                    st.state = SignalState::Done;
+                    if (st.text.isEmpty()) st.text = QStringLiteral("完成");
+                }
+            } else {
+                if (st.state == SignalState::Active) {
+                    st.state = SignalState::Pending;
+                    st.text.clear();
+                }
+            }
+        }
     }
     update();
 }
 
 void TaskFlowWidget::markFinished(const QString &state_id) {
-    status_[state_id] = StateStatus::Done;
-    if (current_ == state_id) current_.clear();
+    int si = -1, xi = -1;
+    if (!resolveState(state_id, &si, &xi)) return;
+    const auto &sl = stages();
+    auto &st = status_[sl[si].id][sl[si].entries[xi].id];
+    st.state = SignalState::Done;
+    if (st.text.isEmpty() || st.text == QStringLiteral("进行中"))
+        st.text = QStringLiteral("完成");
     update();
 }
 
-void TaskFlowWidget::markError(const QString &state_id, const QString &error_msg) {
-    status_[state_id] = StateStatus::Error;
-    errors_[state_id] = error_msg;
+void TaskFlowWidget::markError(const QString &state_id, const QString &err) {
+    int si = -1, xi = -1;
+    if (!resolveState(state_id, &si, &xi)) return;
+    const auto &sl = stages();
+    auto &st = status_[sl[si].id][sl[si].entries[xi].id];
+    st.state = SignalState::Error;
+    st.err_msg = err;
+    st.text = err.isEmpty() ? QStringLiteral("故障") : err;
     update();
 }
 
 void TaskFlowWidget::resetAll() {
-    for (const auto &s : states()) status_[s.id] = StateStatus::Pending;
-    current_.clear();
-    errors_.clear();
+    status_.clear();
+    current_state_.clear();
+    for (const auto &stage : stages()) {
+        for (const auto &sig : stage.entries) {
+            status_[stage.id][sig.id] = SignalStatus{SignalState::Pending, QString(), QString()};
+        }
+    }
     update();
 }
 
-
-// ════════════════════════════════════════════════════════════════════════
-// Layout — recompute station geometry every paint (cheap enough; widget
-// resizes are rare and the math is trivial).
-// ════════════════════════════════════════════════════════════════════════
-void TaskFlowWidget::recomputeGeometry() {
-    const auto &S = states();
-    geom_.clear();
-    geom_.reserve(S.size());
-
-    // Count stations per phase to space them evenly.
-    int n_phase1 = 0, n_phase2 = 0;
-    for (const auto &s : S) (s.phase == 1 ? n_phase1 : n_phase2)++;
-
-    const double W = width();
-    const double H = height();
-
-    // Two horizontal "metro lines": phase 1 in the top third, phase 2 in
-    // the bottom third. Leave generous margins for the labels under each
-    // station.
-    const double margin_x  = 56.0;
-    const double row1_y    = H * 0.30;
-    const double row2_y    = H * 0.72;
-    const double radius    = qMax(12.0, qMin(W / 80.0, 22.0));
-
-    const double usable_w  = W - 2 * margin_x;
-    const double step1     = (n_phase1 > 1) ? usable_w / (n_phase1 - 1) : 0;
-    const double step2     = (n_phase2 > 1) ? usable_w / (n_phase2 - 1) : 0;
-
-    int seen1 = 0, seen2 = 0;
-    for (int i = 0; i < S.size(); ++i) {
-        const auto &s = S[i];
-        StationGeom g{};
-        g.radius = radius;
-        g.idx    = i;
-        if (s.phase == 1) {
-            g.center = QPointF(margin_x + seen1 * step1, row1_y);
-            seen1++;
-        } else {
-            g.center = QPointF(margin_x + seen2 * step2, row2_y);
-            seen2++;
-        }
-        geom_.push_back(g);
-    }
+void TaskFlowWidget::setSignal(const QString &stage_id,
+                                const QString &signal_id,
+                                SignalState state,
+                                const QString &dyn_text) {
+    auto &m = status_[stage_id];
+    auto &st = m[signal_id];
+    st.state = state;
+    st.text = dyn_text;
+    if (state == SignalState::Error) st.err_msg = dyn_text;
+    update();
 }
 
+// ────────────────────────────────────────────────────────────────────────
+// Layout
+// ────────────────────────────────────────────────────────────────────────
 
-// ════════════════════════════════════════════════════════════════════════
+void TaskFlowWidget::recomputeGeometry() {
+    geom_.clear();
+    const auto &sl = stages();
+    geom_.resize(sl.size());
+
+    // Split cards into the two blocks (phase 1 vs phase 2) preserving order.
+    QVector<int> p1_indices, p2_indices;
+    for (int i = 0; i < sl.size(); ++i)
+        (sl[i].phase == 1 ? p1_indices : p2_indices).append(i);
+
+    auto cardH = [&](int idx) {
+        return kTitleH + kCardPad + int(sl[idx].entries.size()) * kSignalH + kCardPad;
+    };
+
+    // For each block, choose row counts based on # cards + column count.
+    auto rowOf = [](int local_idx, int cols) { return local_idx / cols; };
+    auto colOf = [](int local_idx, int cols) { return local_idx % cols; };
+    const int p1_rows = (p1_indices.size() + kPhase1Cols - 1) / kPhase1Cols;
+    const int p2_rows = (p2_indices.size() + kPhase2Cols - 1) / kPhase2Cols;
+
+    // Row max-height (so cards in same row align vertically and aren't
+    // jagged when one stage has more signal rows than its neighbour).
+    auto rowMaxH = [&](const QVector<int> &block, int cols, int row) {
+        int h = 0;
+        for (int li = 0; li < block.size(); ++li) {
+            if (rowOf(li, cols) != row) continue;
+            h = std::max(h, cardH(block[li]));
+        }
+        return h;
+    };
+
+    auto blockSize = [&](const QVector<int> &block, int cols, int rows) {
+        const int w = kBlockPad * 2 + cols * kCardW + (cols - 1) * kCardHGap;
+        int h = kBlockPad * 2 + kBlockHeaderH;
+        for (int r = 0; r < rows; ++r) {
+            h += rowMaxH(block, cols, r);
+            if (r + 1 < rows) h += kCardVGap;
+        }
+        return QSize(w, h);
+    };
+
+    const QSize b1_sz = blockSize(p1_indices, kPhase1Cols, p1_rows);
+    const QSize b2_sz = blockSize(p2_indices, kPhase2Cols, p2_rows);
+
+    // Centre the two blocks horizontally as a pair (keep block widths
+    // intact; centre the gap-spanning pair inside the widget).
+    const int total_w = b1_sz.width() + kBlockGap + b2_sz.width();
+    const int pair_left = std::max(kMargin, (width() - total_w) / 2);
+    const int top = kMargin;
+
+    block1_rect_ = QRectF(pair_left, top, b1_sz.width(),
+                           std::max(b1_sz.height(), b2_sz.height()));
+    block2_rect_ = QRectF(pair_left + b1_sz.width() + kBlockGap, top,
+                           b2_sz.width(),
+                           std::max(b1_sz.height(), b2_sz.height()));
+
+    // Lay out cards inside each block.
+    auto layoutBlock = [&](const QVector<int> &block, int cols, int rows,
+                            const QRectF &area) {
+        const int inner_left = int(area.left()) + kBlockPad;
+        const int inner_top  = int(area.top())  + kBlockPad + kBlockHeaderH;
+        for (int r = 0; r < rows; ++r) {
+            // y baseline for this row
+            int row_y = inner_top;
+            for (int rr = 0; rr < r; ++rr)
+                row_y += rowMaxH(block, cols, rr) + kCardVGap;
+            const int row_h = rowMaxH(block, cols, r);
+            // Determine cards in this row
+            QVector<int> row_local;
+            for (int li = 0; li < block.size(); ++li)
+                if (rowOf(li, cols) == r) row_local.append(li);
+            // Centre row horizontally if it's not full
+            const int row_cards_w = row_local.size() * kCardW
+                                   + (row_local.size() - 1) * kCardHGap;
+            const int row_inner_w = cols * kCardW + (cols - 1) * kCardHGap;
+            const int row_offset  = std::max(0, (row_inner_w - row_cards_w) / 2);
+            for (int li : row_local) {
+                const int idx = block[li];
+                const int col = colOf(li, cols);
+                const int h = cardH(idx);
+                // Top-align to row baseline (so dots line up at the top)
+                const int x = inner_left + row_offset + col * (kCardW + kCardHGap);
+                const int y = row_y;
+                (void)row_h;
+                StageGeom g;
+                g.card_rect = QRectF(x, y, kCardW, h);
+                g.signal_rects.resize(sl[idx].entries.size());
+                for (int k = 0; k < sl[idx].entries.size(); ++k) {
+                    const qreal sy = y + kTitleH + kCardPad + k * kSignalH;
+                    g.signal_rects[k] = QRectF(x + 6, sy, kCardW - 12, kSignalH);
+                }
+                geom_[idx] = g;
+            }
+        }
+    };
+
+    layoutBlock(p1_indices, kPhase1Cols, p1_rows, block1_rect_);
+    layoutBlock(p2_indices, kPhase2Cols, p2_rows, block2_rect_);
+}
+
+void TaskFlowWidget::resizeEvent(QResizeEvent *) {
+    recomputeGeometry();
+}
+
+// ────────────────────────────────────────────────────────────────────────
 // Paint
-// ════════════════════════════════════════════════════════════════════════
+// ────────────────────────────────────────────────────────────────────────
+
 void TaskFlowWidget::paintEvent(QPaintEvent *) {
+    if (geom_.isEmpty()) recomputeGeometry();
+    const auto &sl = stages();
+
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing);
+    p.fillRect(rect(), QColor(0x14, 0x18, 0x22));
 
-    // Background
-    p.fillRect(rect(), QColor(15, 16, 24));      // matches the dashboard's #0f1018
+    QFont f = p.font();
+    f.setFamily("Microsoft YaHei");
 
-    recomputeGeometry();
-
-    const auto &S = states();
-
-    // Row title labels
-    p.setFont(QFont("微软雅黑", 11, QFont::Bold));
-    p.setPen(QColor(180, 190, 220));
-    p.drawText(QRectF(20, height() * 0.30 - 50, 200, 20), Qt::AlignLeft,
-               "Phase 1 · 取下旧电池入库");
-    p.drawText(QRectF(20, height() * 0.72 - 50, 200, 20), Qt::AlignLeft,
-               "Phase 2 · 取新电池装回");
-
-    // 1) Draw connectors first (so circles sit on top).
-    int prev_phase = -1;
-    QPointF prev_center;
-    for (int i = 0; i < S.size(); ++i) {
-        const auto &g = geom_[i];
-        if (S[i].phase != prev_phase) {
-            prev_phase = S[i].phase;
-            prev_center = g.center;
-            continue;
-        }
-        // line color: gradient grey → bright if both endpoints are done
-        const auto status_a = status_.value(S[i - 1].id);
-        const auto status_b = status_.value(S[i].id);
-        QColor line_color;
-        if (status_a == StateStatus::Done && status_b == StateStatus::Done)
-            line_color = QColor(76, 175, 80);
-        else if (status_a == StateStatus::Done || status_a == StateStatus::Current)
-            line_color = QColor(110, 130, 170);
-        else
-            line_color = QColor(70, 78, 100);
-        p.setPen(QPen(line_color, 4));
-        p.drawLine(prev_center, g.center);
-        prev_center = g.center;
-    }
-
-    // Crossover line from end of phase 1 to start of phase 2 (drawn as
-    // a curved/elbow to suggest "phase boundary, not direct movement").
-    int phase1_last_idx = -1, phase2_first_idx = -1;
-    for (int i = 0; i < S.size(); ++i) {
-        if (S[i].phase == 1) phase1_last_idx = i;
-        if (S[i].phase == 2 && phase2_first_idx < 0) phase2_first_idx = i;
-    }
-    if (phase1_last_idx >= 0 && phase2_first_idx >= 0) {
-        const QPointF a = geom_[phase1_last_idx].center;
-        const QPointF b = geom_[phase2_first_idx].center;
-        QColor connector(110, 110, 130);
-        p.setPen(QPen(connector, 3, Qt::DashLine));
-        // S-curve via two intermediate points
-        const QPointF c1(a.x(),       (a.y() + b.y()) / 2.0);
-        const QPointF c2(b.x(),       (a.y() + b.y()) / 2.0);
-        QPainterPath path;
-        path.moveTo(a);
-        path.cubicTo(c1, c2, b);
-        p.drawPath(path);
-    }
-
-    // 2) Draw stations
-    p.setFont(QFont("微软雅黑", 9));
-    for (int i = 0; i < S.size(); ++i) {
-        const auto &s = S[i];
-        const auto &g = geom_[i];
-        const StateStatus st = status_.value(s.id);
-
-        // Pulse glow under current state
-        if (st == StateStatus::Current) {
-            const double pulse_factor = 0.5 + 0.5 * std::sin(pulse_phase_ * M_PI / 180.0);
-            QRadialGradient grad(g.center, g.radius * 2.2);
-            QColor glow(33, 150, 243);
-            glow.setAlphaF(0.55 * pulse_factor);
-            grad.setColorAt(0, glow);
-            glow.setAlphaF(0);
-            grad.setColorAt(1, glow);
-            p.setBrush(grad);
-            p.setPen(Qt::NoPen);
-            p.drawEllipse(g.center, g.radius * 2.2, g.radius * 2.2);
-        }
-
-        // Station fill color
-        QColor fill, border;
-        switch (st) {
-            case StateStatus::Pending:
-                fill   = QColor(55, 60, 80);
-                border = QColor(110, 120, 145);
-                break;
-            case StateStatus::Current:
-                fill   = QColor(33, 150, 243);
-                border = QColor(180, 220, 255);
-                break;
-            case StateStatus::Done:
-                fill   = QColor(76, 175, 80);
-                border = QColor(180, 230, 180);
-                break;
-            case StateStatus::Error:
-                fill   = QColor(244, 67, 54);
-                border = QColor(255, 200, 200);
-                break;
-        }
-        // Hover ring
-        if (hover_idx_ == i) border = QColor(255, 200, 80);
-
-        p.setBrush(fill);
-        p.setPen(QPen(border, 2));
-        p.drawEllipse(g.center, g.radius, g.radius);
-
-        // Station index inside circle
-        p.setPen(QColor(245, 248, 252));
-        p.setFont(QFont("微软雅黑", 9, QFont::Bold));
-        p.drawText(QRectF(g.center.x() - g.radius,
-                          g.center.y() - g.radius,
-                          g.radius * 2, g.radius * 2),
-                    Qt::AlignCenter,
-                    QString::number(i + 1));
-
-        // Station label below the circle (alternate offset to prevent overlap)
-        p.setFont(QFont("微软雅黑", 9));
-        p.setPen(QColor(220, 230, 245));
-        const double label_y = g.center.y() + g.radius + (i % 2 == 0 ? 6 : 22);
-        p.drawText(QRectF(g.center.x() - 50, label_y, 100, 18),
-                    Qt::AlignCenter, s.label);
-
-        // Tick mark for done states
-        if (st == StateStatus::Done) {
-            p.setPen(QPen(QColor(245, 248, 252), 2));
-            QPointF p1(g.center.x() - g.radius * 0.45, g.center.y() + g.radius * 0.05);
-            QPointF p2(g.center.x() - g.radius * 0.10, g.center.y() + g.radius * 0.40);
-            QPointF p3(g.center.x() + g.radius * 0.55, g.center.y() - g.radius * 0.30);
-            p.drawLine(p1, p2);
-            p.drawLine(p2, p3);
-        }
-        // ✗ mark for error states
-        if (st == StateStatus::Error) {
-            p.setPen(QPen(QColor(245, 248, 252), 2));
-            const double r = g.radius * 0.55;
-            p.drawLine(g.center.x() - r, g.center.y() - r,
-                       g.center.x() + r, g.center.y() + r);
-            p.drawLine(g.center.x() + r, g.center.y() - r,
-                       g.center.x() - r, g.center.y() + r);
-        }
-    }
-
-    // Legend
-    p.setFont(QFont("微软雅黑", 8));
-    p.setPen(QColor(180, 190, 220));
-    const int legend_y = height() - 18;
-    int x = 12;
-    auto drawLegendDot = [&](QColor c, const char *label) {
-        p.setBrush(c);
-        p.setPen(QPen(c.lighter(140), 1));
-        p.drawEllipse(QPointF(x, legend_y), 5, 5);
-        p.setPen(QColor(200, 210, 230));
-        p.drawText(x + 9, legend_y + 4, label);
-        x += int(p.fontMetrics().horizontalAdvance(label)) + 26;
+    // ── Two block frames + headers ────────────────────────────────────
+    auto drawBlock = [&](const QRectF &r, const QString &title, const QColor &accent) {
+        if (r.isNull()) return;
+        p.setBrush(QColor(0x18, 0x1e, 0x2c, 200));
+        QPen border(QColor(accent.red(), accent.green(), accent.blue(), 160));
+        border.setWidth(2);
+        p.setPen(border);
+        p.drawRoundedRect(r, 12, 12);
+        // Title bar across the top
+        QRectF tb(r.left() + 1, r.top() + 1, r.width() - 2, kBlockHeaderH);
+        QLinearGradient g(tb.topLeft(), tb.bottomLeft());
+        g.setColorAt(0, QColor(accent.red(), accent.green(), accent.blue(), 60));
+        g.setColorAt(1, QColor(0x18, 0x1e, 0x2c, 0));
+        p.setPen(Qt::NoPen);
+        p.setBrush(g);
+        QPainterPath tp;
+        tp.addRoundedRect(tb, 12, 12);
+        tp.addRect(QRectF(tb.left(), tb.bottom() - 10, tb.width(), 10));
+        p.drawPath(tp);
+        f.setPointSize(11); f.setBold(true); p.setFont(f);
+        p.setPen(accent);
+        p.drawText(tb.adjusted(14, 0, -10, 0), Qt::AlignVCenter | Qt::AlignLeft, title);
+        f.setBold(false);
     };
-    drawLegendDot(QColor(55, 60, 80),  "未到");
-    drawLegendDot(QColor(33, 150, 243), "执行中");
-    drawLegendDot(QColor(76, 175, 80), "已完成");
-    drawLegendDot(QColor(244, 67, 54), "失败");
+    drawBlock(block1_rect_, QStringLiteral("◆  取电池  (Phase 1)"),
+              QColor(0x6e, 0xb8, 0xff));
+    drawBlock(block2_rect_, QStringLiteral("◆  装电池  (Phase 2)"),
+              QColor(0xff, 0xb0, 0x6e));
+
+    // ── Bezier arrows between consecutive cards within each phase ────
+    //
+    // Within a grid layout each card has up to two anchored connectors:
+    //   • horizontal: right-edge → left-edge (same row)
+    //   • vertical:   bottom-edge → top-edge (row-wrap)
+    // Picking distinct exit/entry points per direction stops two arrows
+    // from piling onto the same side of a card.
+    const QColor kArrowCol(0x6a, 0x88, 0xb8);
+    for (int i = 0; i + 1 < sl.size(); ++i) {
+        if (sl[i].phase != sl[i + 1].phase) continue;
+        const QRectF &r0 = geom_[i].card_rect;
+        const QRectF &r1 = geom_[i + 1].card_rect;
+        const bool same_row = std::abs(r0.top() - r1.top()) < 4.0;
+        QPointF s, e;
+        bool vertical = false;
+        if (same_row) {
+            // Source on left, target on right → exit right, enter left.
+            const bool left_to_right = r0.center().x() < r1.center().x();
+            s = QPointF(left_to_right ? r0.right() : r0.left(), r0.center().y());
+            e = QPointF(left_to_right ? r1.left()  : r1.right(), r1.center().y());
+        } else {
+            // Row-wrap: drop out the bottom of the source, enter the top of
+            // the target. dx may be non-zero (next row wraps to col 0), so
+            // the curve has a soft S-shape.
+            s = QPointF(r0.center().x(), r0.bottom());
+            e = QPointF(r1.center().x(), r1.top());
+            vertical = true;
+        }
+        drawBezierArrow(p, s, e, kArrowCol, /*dashed=*/false, vertical);
+    }
+
+    // Cross-phase Bezier (last of phase 1 → first of phase 2)
+    int p1_last = -1, p2_first = -1;
+    for (int i = 0; i < sl.size(); ++i) {
+        if (sl[i].phase == 1) p1_last = i;
+        if (sl[i].phase == 2 && p2_first < 0) p2_first = i;
+    }
+    if (p1_last >= 0 && p2_first >= 0) {
+        const auto &a = geom_[p1_last].card_rect;
+        const auto &b = geom_[p2_first].card_rect;
+        // Right side of phase-1 last → left side of phase-2 first
+        const QPointF s(a.right(),     a.center().y());
+        const QPointF e(b.left(),      b.center().y());
+        drawBezierArrow(p, s, e, QColor(0xc0, 0x90, 0x60), /*dashed=*/true);
+    }
+
+    // Cards
+    for (int i = 0; i < sl.size(); ++i) {
+        const auto &stage = sl[i];
+        const auto &g     = geom_[i];
+
+        const auto sigMap = status_.value(stage.id);
+        bool any_active = false, any_error = false, any_done = false, all_done = true;
+        for (const auto &sig : stage.entries) {
+            const SignalState st = sigMap.value(sig.id).state;
+            if (st == SignalState::Error)  any_error  = true;
+            if (st == SignalState::Active) any_active = true;
+            if (st == SignalState::Done)   any_done   = true;
+            if (st != SignalState::Done)   all_done   = false;
+        }
+        SignalState worst;
+        if (any_error)       worst = SignalState::Error;
+        else if (any_active) worst = SignalState::Active;
+        else if (all_done)   worst = SignalState::Done;
+        else if (any_done)   worst = SignalState::Active;
+        else                 worst = SignalState::Pending;
+        const QColor edge = stateColor(worst, pulse_phase_);
+
+        // Card body
+        p.setBrush(QColor(0x1c, 0x22, 0x32, 230));
+        QPen ep(edge); ep.setWidth(worst == SignalState::Active ? 3 : 2);
+        p.setPen(ep);
+        p.drawRoundedRect(g.card_rect, 8, 8);
+
+        // Title bar
+        QRectF tr(g.card_rect.left(), g.card_rect.top(), g.card_rect.width(), kTitleH);
+        QLinearGradient grad(tr.topLeft(), tr.bottomLeft());
+        grad.setColorAt(0, QColor(0x25, 0x2e, 0x44));
+        grad.setColorAt(1, QColor(0x1a, 0x21, 0x32));
+        p.setPen(Qt::NoPen);
+        p.setBrush(grad);
+        QPainterPath titlePath;
+        titlePath.addRoundedRect(tr, 8, 8);
+        titlePath.addRect(QRectF(tr.left(), tr.bottom() - 8, tr.width(), 8));
+        p.drawPath(titlePath);
+
+        f.setPointSize(10); f.setBold(true); p.setFont(f);
+        p.setPen(QColor(0xd8, 0xe0, 0xf0));
+        const QString head = QStringLiteral("%1  %2").arg(stage.number).arg(stage.title);
+        p.drawText(tr.adjusted(10, 0, -28, 0), Qt::AlignVCenter | Qt::AlignLeft, head);
+
+        p.setPen(Qt::NoPen);
+        p.setBrush(edge);
+        QRectF pill(tr.right() - 22, tr.center().y() - 6, 12, 12);
+        p.drawEllipse(pill);
+
+        // Signal rows
+        f.setPointSize(8); f.setBold(false); p.setFont(f);
+        for (int k = 0; k < stage.entries.size(); ++k) {
+            const auto &sig = stage.entries[k];
+            const auto &st = sigMap.value(sig.id);
+            const QRectF row = g.signal_rects[k];
+
+            // Dot (+ halo when Active)
+            QPointF dot(row.left() + 8, row.center().y());
+            const QColor c = stateColor(st.state, pulse_phase_);
+            if (st.state == SignalState::Active) {
+                QColor halo = c; halo.setAlpha(70);
+                p.setPen(Qt::NoPen); p.setBrush(halo);
+                p.drawEllipse(dot, kDotR + 4, kDotR + 4);
+            }
+            p.setPen(Qt::NoPen); p.setBrush(c);
+            p.drawEllipse(dot, kDotR, kDotR);
+
+            const qreal text_x = row.left() + 22;
+            p.setPen(QColor(0xa8, 0xb4, 0xc8));
+            p.drawText(QRectF(text_x, row.top(), 72, row.height()),
+                       Qt::AlignVCenter | Qt::AlignLeft, sig.label);
+
+            p.setPen(QColor(0x6a, 0x71, 0x80));
+            p.drawText(QRectF(text_x + 72, row.top(), 8, row.height()),
+                       Qt::AlignVCenter | Qt::AlignLeft, ":");
+
+            QString shown = st.text;
+            if (shown.isEmpty()) {
+                shown = (st.state == SignalState::Done)    ? QStringLiteral("完成")
+                      : (st.state == SignalState::Error)   ? QStringLiteral("故障")
+                      : (st.state == SignalState::Active)  ? QStringLiteral("进行中")
+                                                            : sig.default_text;
+            }
+            QColor txt_col = (st.state == SignalState::Done)    ? QColor(0x90, 0xff, 0xc0)
+                          : (st.state == SignalState::Error)   ? QColor(0xff, 0xa0, 0xa0)
+                          : (st.state == SignalState::Active)  ? QColor(0xa8, 0xc8, 0xff)
+                                                                : QColor(0x70, 0x78, 0x88);
+            p.setPen(txt_col);
+            p.drawText(QRectF(text_x + 80, row.top(),
+                              row.width() - 84, row.height()),
+                       Qt::AlignVCenter | Qt::AlignLeft, shown);
+        }
+    }
 }
 
+// ────────────────────────────────────────────────────────────────────────
+// Mouse / hover
+// ────────────────────────────────────────────────────────────────────────
 
-// ════════════════════════════════════════════════════════════════════════
-// Pulse animation
-// ════════════════════════════════════════════════════════════════════════
-void TaskFlowWidget::onPulseTick() {
-    pulse_phase_ = (pulse_phase_ + 6) % 360;
-    // Only repaint if there is a current state (otherwise nothing animates).
-    if (!current_.isEmpty()) update();
-}
-
-
-// ════════════════════════════════════════════════════════════════════════
-// Mouse interaction
-// ════════════════════════════════════════════════════════════════════════
 void TaskFlowWidget::mousePressEvent(QMouseEvent *event) {
     if (event->button() != Qt::LeftButton) return;
-    for (const auto &g : geom_) {
-        if (QLineF(g.center, event->position()).length() <= g.radius) {
-            emit stationClicked(states()[g.idx].id);
-            return;
+    const QPointF p = event->position();
+    for (int i = 0; i < geom_.size(); ++i) {
+        if (!geom_[i].card_rect.contains(p)) continue;
+        const auto &stage = stages()[i];
+        for (int k = 0; k < stage.entries.size(); ++k) {
+            if (!geom_[i].signal_rects[k].contains(p)) continue;
+            const QString sgid = stage.entries[k].id;
+            for (const auto &m : legacyMap()) {
+                if (stage.id == QLatin1String(m.stage) &&
+                    sgid    == QLatin1String(m.signal)) {
+                    emit stationClicked(QString::fromLatin1(m.state));
+                    return;
+                }
+            }
+        }
+        for (const auto &m : legacyMap()) {
+            if (stage.id == QLatin1String(m.stage)) {
+                emit stationClicked(QString::fromLatin1(m.state));
+                return;
+            }
         }
     }
 }
 
 void TaskFlowWidget::mouseMoveEvent(QMouseEvent *event) {
-    int new_hover = -1;
-    QString tooltip;
-    for (const auto &g : geom_) {
-        if (QLineF(g.center, event->position()).length() <= g.radius * 1.3) {
-            new_hover = g.idx;
-            const auto &s = states()[g.idx];
-            tooltip = QString("<b>%1 · %2</b><br>%3").arg(g.idx + 1).arg(s.label, s.desc);
-            const auto err_it = errors_.constFind(s.id);
-            if (err_it != errors_.constEnd()) {
-                tooltip += QString("<br><span style='color:#f44'>错误: %1</span>").arg(*err_it);
+    const QPointF p = event->position();
+    int new_card = -1, new_sig = -1;
+    QString tip;
+    for (int i = 0; i < geom_.size(); ++i) {
+        if (!geom_[i].card_rect.contains(p)) continue;
+        new_card = i;
+        for (int k = 0; k < geom_[i].signal_rects.size(); ++k) {
+            if (geom_[i].signal_rects[k].contains(p)) {
+                new_sig = k;
+                tip = stages()[i].entries[k].label;
+                break;
             }
-            break;
         }
+        if (new_sig < 0) tip = stages()[i].title;
+        break;
     }
-    if (new_hover != hover_idx_) {
-        hover_idx_ = new_hover;
+    if (new_card != hover_card_ || new_sig != hover_sig_) {
+        hover_card_ = new_card;
+        hover_sig_  = new_sig;
         update();
     }
-    if (!tooltip.isEmpty()) QToolTip::showText(event->globalPosition().toPoint(), tooltip, this);
-    else                    QToolTip::hideText();
+    if (!tip.isEmpty()) QToolTip::showText(event->globalPosition().toPoint(), tip, this);
+    else                QToolTip::hideText();
+}
+
+void TaskFlowWidget::onPulseTick() {
+    pulse_phase_ = (pulse_phase_ + 12) % 360;
+    for (const auto &stage : stages()) {
+        const auto &m = status_.value(stage.id);
+        for (const auto &sig : stage.entries) {
+            if (m.value(sig.id).state == SignalState::Active) {
+                update();
+                return;
+            }
+        }
+    }
 }

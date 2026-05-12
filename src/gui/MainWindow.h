@@ -51,6 +51,10 @@ private slots:
     void onVideoEnabledToggled(bool checked);
     void onVideoSourceToggled();       // RGB <-> colorized depth
     void pollDetections();
+    // Moves the single CameraWidget between the dashboard slot and Tab4's
+    // camera dock when the active tab changes. The two tabs never show
+    // video at the same time.
+    void onTabChanged(int index);
 
 private:
     void buildUi();
@@ -70,6 +74,8 @@ private:
     // GUI widgets
     QTabWidget   *tab_widget_;
     CameraWidget *camera_widget_;
+    QWidget      *dashboard_tab_ = nullptr;       // pointer for tab compare
+    QSplitter    *dash_left_splitter_ = nullptr;  // owner when on dashboard
     LogWidget    *log_widget_;
     ArmWidget    *arm_widget_;
     PiperWidget  *piper_widget_ = nullptr;   // gen-2 arm widget (shown when backend=piper)

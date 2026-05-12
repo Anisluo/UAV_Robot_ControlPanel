@@ -71,9 +71,22 @@ PiperWidget::PiperWidget(RpcClient *rpc, QWidget *parent)
 
 PiperWidget::~PiperWidget()
 {
+    // Stop all polling timers up-front so no new RPC callbacks queue while
+    // we're tearing down. Without this the 20 Hz pollJointsAndPose timer
+    // can fire one more time mid-destruction and reference a dangling
+    // sim_thread_.
+    if (poll_state_timer_)  poll_state_timer_->stop();
+    if (poll_status_timer_) poll_status_timer_->stop();
+
     if (sim_thread_) {
         sim_thread_->quit();
-        sim_thread_->wait(2000);
+        if (!sim_thread_->wait(5000)) {
+            // Worker stuck (typically still parsing STLs). Force-exit so
+            // the application can close — minor leak is preferable to a
+            // hung process.
+            sim_thread_->terminate();
+            sim_thread_->wait(500);
+        }
     }
 }
 

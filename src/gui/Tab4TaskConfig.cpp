@@ -62,7 +62,10 @@ void Tab4TaskConfig::buildUi()
 
     auto *leftSplitter = new QSplitter(Qt::Vertical, mainSplitter);
     leftSplitter->addWidget(build3DViewer());
-    leftSplitter->addWidget(buildSimPanel());
+    // The bottom slot used to host buildSimPanel() (joint sliders / sweep
+    // buttons). It is now a passive dock that the MainWindow reparents the
+    // shared CameraWidget into on tab switch.
+    leftSplitter->addWidget(buildCameraDock());
     leftSplitter->setStretchFactor(0, 3);
     leftSplitter->setStretchFactor(1, 1);
     leftSplitter->setSizes({520, 260});
@@ -74,11 +77,19 @@ void Tab4TaskConfig::buildUi()
     mainSplitter->setStretchFactor(1, 5);
     mainSplitter->setSizes({420, 1000});
 
-    outerLayout->addWidget(mainSplitter, 3);
+    // Give the flow chart row more vertical space — bumping the
+    // mainSplitter stretch factor (was 3) means the log gets a smaller
+    // slice and the 9-card flow chart fits without clipping.
+    outerLayout->addWidget(mainSplitter, 6);
 
     // ── Bottom: log ───────────────────────────────────────────────────────
+    // The log panel used to grab ~25% of the tab; the new flow chart needs
+    // more vertical room, so we shrink the log to a 3-line peek and let
+    // the user expand it manually via the splitter handle if they want
+    // deeper output.
     log_widget_ = new LogWidget(rpc_, this);
-    log_widget_->setMinimumHeight(120);
+    log_widget_->setMinimumHeight(70);
+    log_widget_->setMaximumHeight(110);
     outerLayout->addWidget(log_widget_, 1);
 }
 
@@ -237,12 +248,30 @@ void Tab4TaskConfig::start3DSimThread()
 void Tab4TaskConfig::stop3DSimThread()
 {
     if (!sim_thread_) return;
+    // Stop polling via a NON-blocking queued call. A BlockingQueuedConnection
+    // here would deadlock at shutdown if the worker is mid-loadAssets (a long
+    // synchronous slot) — the worker can't drain its event queue until
+    // loadAssets returns, and the GUI thread would be stuck waiting on it.
     if (sim_worker_) {
         QMetaObject::invokeMethod(sim_worker_, "stopAnglePolling",
-                                  Qt::BlockingQueuedConnection);
+                                  Qt::QueuedConnection);
     }
+    // Also drop the pending-RPC bridge so a late reply doesn't fire into a
+    // half-destroyed widget.
+    if (rpc_) disconnect(rpc_, nullptr, this, nullptr);
+
     sim_thread_->quit();
-    sim_thread_->wait(2000);
+    // Generous wait — loadAssets parses 10 STL files which can run a couple
+    // of seconds on first start; we'd rather block briefly than orphan the
+    // thread (which would leak the worker and confuse the next QApplication
+    // exit).
+    if (!sim_thread_->wait(5000)) {
+        // Worst case: the worker is wedged on file I/O. Force-terminate so
+        // the process can actually exit. May leak the worker QObject, but
+        // we're already on the way out.
+        sim_thread_->terminate();
+        sim_thread_->wait(500);
+    }
     sim_thread_  = nullptr;
     sim_worker_  = nullptr;
 }
@@ -267,8 +296,50 @@ void Tab4TaskConfig::onAnglesRequested()
         });
 }
 
+// ────────────────────────────────────────────────────────────────────────
+// Camera dock — empty container that the MainWindow drops the shared
+// CameraWidget into when the user is on this tab. Same outer footprint
+// as the legacy 3D-sim panel so the splitter geometry doesn't shift.
+// ────────────────────────────────────────────────────────────────────────
+QWidget* Tab4TaskConfig::buildCameraDock()
+{
+    auto *grp = new QGroupBox(QStringLiteral("相机视频"), this);
+    auto *layout = new QVBoxLayout(grp);
+    layout->setContentsMargins(8, 18, 8, 8);
+    layout->setSpacing(0);
+
+    cam_dock_ = new QWidget(grp);
+    auto *dl = new QVBoxLayout(cam_dock_);
+    dl->setContentsMargins(0, 0, 0, 0);
+    dl->setSpacing(0);
+    cam_dock_->setMinimumHeight(160);
+    layout->addWidget(cam_dock_, 1);
+
+    return grp;
+}
+
+void Tab4TaskConfig::mountCamera(QWidget *cam)
+{
+    if (!cam_dock_ || !cam) return;
+    if (cam->parentWidget() == cam_dock_) return;
+    cam->setParent(cam_dock_);
+    cam_dock_->layout()->addWidget(cam);
+    cam->show();
+}
+
+void Tab4TaskConfig::unmountCamera()
+{
+    // The MainWindow re-parents the camera onto its own splitter; the
+    // QLayout drops the widget reference automatically when setParent()
+    // is called with a different owner, so this is a no-op hook kept for
+    // symmetry / future cleanup.
+}
+
 // Sim panel + trajectory data + sim event handlers — split out only to
 // keep this file readable.  Reads/writes the same Tab4TaskConfig members.
+// buildSimPanel() is no longer wired into the UI (the camera dock took
+// its slot), but the trajectory/animation helpers remain compiled for
+// potential reuse from menu actions.
 #include "Tab4SimPanel.inc"
 
 QWidget* Tab4TaskConfig::buildTaskPanel()
@@ -295,9 +366,15 @@ QWidget* Tab4TaskConfig::buildTaskPanel()
     btn_flow_start_ = new QPushButton("▶ 开始", grp);
     btn_flow_stop_  = new QPushButton("⏸ 停止", grp);
     btn_flow_reset_ = new QPushButton("↻ 复位", grp);
+    btn_estop_      = new QPushButton("急停 ESTOP", grp);
     btn_flow_start_->setFixedHeight(32);
     btn_flow_stop_->setFixedHeight(32);
     btn_flow_reset_->setFixedHeight(32);
+    // Estop sits next to the reset button on the same bar — slightly taller
+    // and wider than its neighbours so it still reads as the panic action
+    // without dominating the layout.
+    btn_estop_->setFixedHeight(36);
+    btn_estop_->setMinimumWidth(120);
     btn_flow_stop_->setEnabled(false);
     btn_flow_start_->setStyleSheet(
         "QPushButton { background:#3a8; color:white; font-weight:bold; padding:4px 14px; }"
@@ -305,9 +382,19 @@ QWidget* Tab4TaskConfig::buildTaskPanel()
     btn_flow_stop_->setStyleSheet(
         "QPushButton { background:#c33; color:white; font-weight:bold; padding:4px 14px; }"
         "QPushButton:disabled { background:#553; color:#aab; }");
+    btn_estop_->setStyleSheet(
+        "QPushButton {"
+        "  background:#c0392b; color:white; font-weight:bold;"
+        "  border:2px solid #ffeb3b; border-radius:5px;"
+        "  padding:2px 14px; letter-spacing:1px;"
+        "}"
+        "QPushButton:hover  { background:#e74c3c; }"
+        "QPushButton:pressed{ background:#962d22; border-color:#fbc02d; }");
     bar->addWidget(btn_flow_start_);
     bar->addWidget(btn_flow_stop_);
     bar->addWidget(btn_flow_reset_);
+    bar->addSpacing(10);
+    bar->addWidget(btn_estop_);
     bar->addStretch(1);
 
     flow_status_label_ = new QLabel("就绪 · 模式: 模拟", grp);
@@ -319,18 +406,6 @@ QWidget* Tab4TaskConfig::buildTaskPanel()
     // ── Flow chart — the main attraction ─────────────────────────────────
     flow_widget_ = new TaskFlowWidget(grp);
     layout->addWidget(flow_widget_, /*stretch=*/1);
-
-    // ── Big red E-STOP ───────────────────────────────────────────────────
-    btn_estop_ = new QPushButton("急  停  ESTOP", grp);
-    btn_estop_->setFixedHeight(44);
-    btn_estop_->setStyleSheet(
-        "QPushButton {"
-        "  background: #c0392b; color: white; font-size: 16px; font-weight: bold;"
-        "  border: 2px solid #ffeb3b; border-radius: 6px; letter-spacing: 3px;"
-        "}"
-        "QPushButton:hover  { background: #e74c3c; }"
-        "QPushButton:pressed{ background: #962d22; border-color: #fbc02d; }");
-    layout->addWidget(btn_estop_);
 
     // ── Legacy single-task pieces (kept invisible by default so the rest
     //    of the file's old onStartTask/onStopTask plumbing still compiles
@@ -559,6 +634,14 @@ void Tab4TaskConfig::onFlowStart()
 
     if (flow_simulating_) {
         appendLog("info", "模拟模式启动 — 流程图驱动 3D 视图, 不接触真实机械臂");
+        // Halt the 5 Hz arm.get_angles poll while the simulator drives
+        // the viewer at 30 Hz — otherwise each RPC reply overwrites the
+        // interpolated frame and the arm visibly snaps back to the live
+        // pose every 200 ms, which reads as choppy motion.
+        if (sim_worker_) {
+            QMetaObject::invokeMethod(sim_worker_, "stopAnglePolling",
+                                      Qt::QueuedConnection);
+        }
         // Seed starting joints from whatever's currently in the viewer.
         flow_sim_start_joints_  = { 0, 0, 0, 0, 0, 0 };
         flow_sim_target_joints_ = TaskFlowWidget::states()[0].demo_joints_deg;
@@ -596,6 +679,12 @@ void Tab4TaskConfig::onFlowStop()
     appendLog("info", "停止任务流程");
     if (flow_simulating_) {
         flow_sim_timer_->stop();
+        // Resume the live angle poll so the viewer tracks the real arm
+        // again once the simulator stops driving it.
+        if (sim_worker_) {
+            QMetaObject::invokeMethod(sim_worker_, "startAnglePolling",
+                                      Qt::QueuedConnection, Q_ARG(int, 200));
+        }
     } else {
         swap_poll_timer_->stop();
         rpc_->call("swap.cancel", QJsonObject{}, nullptr);
@@ -644,6 +733,11 @@ void Tab4TaskConfig::onFlowSimTick()
             // Task complete.
             appendLog("info", "模拟运行完成 — 全 24 状态走完");
             flow_sim_timer_->stop();
+            // Mirror onFlowStop(): hand the viewer back to the live poll.
+            if (sim_worker_) {
+                QMetaObject::invokeMethod(sim_worker_, "startAnglePolling",
+                                          Qt::QueuedConnection, Q_ARG(int, 200));
+            }
             flow_running_ = false;
             btn_flow_start_->setEnabled(true);
             btn_flow_stop_->setEnabled(false);

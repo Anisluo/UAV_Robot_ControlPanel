@@ -36,6 +36,30 @@
 #include <QSettings>
 #include <QCloseEvent>
 
+#ifdef Q_OS_WIN
+#  include <windows.h>
+#  include <dwmapi.h>
+// DwmSetWindowAttribute attribute IDs for the dark-mode title bar were
+// renumbered between insider builds: 19 on Win10 19H1 (18985..19041 dev)
+// and 20 on Win10 20H1+ / Win11. Calling both is safe — unknown IDs
+// return an error code we ignore.
+#  ifndef DWMWA_USE_IMMERSIVE_DARK_MODE_OLD
+#    define DWMWA_USE_IMMERSIVE_DARK_MODE_OLD 19
+#  endif
+#  ifndef DWMWA_USE_IMMERSIVE_DARK_MODE
+#    define DWMWA_USE_IMMERSIVE_DARK_MODE 20
+#  endif
+#  ifndef DWMWA_CAPTION_COLOR
+#    define DWMWA_CAPTION_COLOR 35  // Win11 22000+
+#  endif
+#  ifndef DWMWA_TEXT_COLOR
+#    define DWMWA_TEXT_COLOR 36
+#  endif
+#  ifndef DWMWA_BORDER_COLOR
+#    define DWMWA_BORDER_COLOR 34
+#  endif
+#endif
+
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
     , rpc_client_(new RpcClient(this))
@@ -47,10 +71,39 @@ MainWindow::MainWindow(QWidget *parent)
 
     buildUi();
 
+#ifdef Q_OS_WIN
+    // ── Dark-themed Windows title bar ────────────────────────────────────
+    // The default white system caption clashes with our dark scientific
+    // palette. DWM exposes a private flag (officially documented in
+    // Windows SDK 10.0.22000) that flips the non-client area to dark.
+    // The colour-customisation attributes (CAPTION_COLOR / TEXT_COLOR /
+    // BORDER_COLOR) only exist on Win11 22H2+; older builds silently
+    // ignore them.
+    HWND hwnd = reinterpret_cast<HWND>(winId());
+    BOOL useDark = TRUE;
+    DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE, &useDark, sizeof(useDark));
+    DwmSetWindowAttribute(hwnd, DWMWA_USE_IMMERSIVE_DARK_MODE_OLD, &useDark, sizeof(useDark));
+
+    // Use the same panel color as the StyleSheet dark theme so the
+    // caption blends with the rest of the window. COLORREF is 0x00BBGGRR.
+    const COLORREF kCaption = 0x001A1816;  // ~ #16181A
+    const COLORREF kText    = 0x00E8DCC8;  // ~ #C8DCE8
+    const COLORREF kBorder  = 0x00322830;  // ~ #302832
+    DwmSetWindowAttribute(hwnd, DWMWA_CAPTION_COLOR, &kCaption, sizeof(kCaption));
+    DwmSetWindowAttribute(hwnd, DWMWA_TEXT_COLOR,    &kText,    sizeof(kText));
+    DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR,  &kBorder,  sizeof(kBorder));
+#endif
+
     // Connect RpcClient signals
     connect(rpc_client_, &RpcClient::connected,    this, &MainWindow::onRpcConnected);
     connect(rpc_client_, &RpcClient::disconnected, this, &MainWindow::onRpcDisconnected);
     connect(rpc_client_, &RpcClient::logMessage,   this, &MainWindow::onLogMessage);
+
+    // Reparent the single CameraWidget when the active tab changes so the
+    // video stream follows the user between 主控面板 and 任务配置 (only one
+    // shows it at any moment).
+    connect(tab_widget_, &QTabWidget::currentChanged,
+            this,        &MainWindow::onTabChanged);
 
     // Connect VideoClient signals
     connect(video_client_, &VideoClient::frameReady,  camera_widget_, &CameraWidget::setFrame);
@@ -73,6 +126,11 @@ MainWindow::MainWindow(QWidget *parent)
     // Restore previously-saved UI parameters from the persistent INI file.
     // Done last so all child widgets exist and their loadConfig() can run.
     loadConfig();
+
+    // Mount the camera into whichever tab was restored as active. The
+    // currentChanged() signal won't fire if the restored index equals the
+    // already-current index, so trigger the handler explicitly once.
+    onTabChanged(tab_widget_->currentIndex());
 }
 
 MainWindow::~MainWindow()
@@ -83,6 +141,24 @@ void MainWindow::closeEvent(QCloseEvent *event)
 {
     // Persist all UI parameters before the window goes away.
     saveConfig();
+
+    // ── Proactive shutdown so destructors don't have to drain everything
+    //    at once. Without this, the bare ~MainWindow → Qt-child-destruct
+    //    chain could:
+    //      1. fire one more 20 Hz pollJointsAndPose timer into a half-dead
+    //         PiperWidget,
+    //      2. let MeshPinger continue spawning ping() processes that
+    //         block QProcess destruction,
+    //      3. leave the sim worker thread still loading STL files when
+    //         Tab4TaskConfig's destructor calls wait(2000) on it.
+    //
+    //    Stopping pieces here, in deterministic order, makes the close
+    //    snappy and the process exit clean.
+    if (mesh_pinger_)  mesh_pinger_->stop();
+    if (det_timer_)    det_timer_->stop();
+    if (video_client_) video_client_->disconnectFromHost();
+    if (rpc_client_)   rpc_client_->disconnectFromHost();
+
     QMainWindow::closeEvent(event);
 }
 
@@ -93,6 +169,7 @@ void MainWindow::buildUi()
 
     // Tab 1: Dashboard
     QWidget *dashTab = buildDashboardTab();
+    dashboard_tab_ = dashTab;
     tab_widget_->addTab(dashTab, "主控面板");
 
     // Tab 2: Task Configuration (between dashboard and comm config)
@@ -134,9 +211,14 @@ QWidget* MainWindow::buildDashboardTab()
 
     // ── Left: camera + log (vertical splitter) ──
     auto *leftSplitter = new QSplitter(Qt::Vertical, mainSplitter);
+    dash_left_splitter_ = leftSplitter;   // remembered so onTabChanged can
+                                          // reattach the camera here.
 
     camera_widget_ = new CameraWidget(leftSplitter);
-    camera_widget_->setMinimumHeight(300);
+    // Min-height has to fit both the spacious dashboard slot and Tab4's
+    // smaller dock; pick a low floor and let the splitters drive the
+    // actual size.
+    camera_widget_->setMinimumHeight(120);
 
     log_widget_ = new LogWidget(rpc_client_, leftSplitter);
     log_widget_->setMinimumHeight(120);
@@ -466,6 +548,27 @@ void MainWindow::onFpsUpdated(double fps)
 void MainWindow::onLogMessage(const QString &msg)
 {
     log_widget_->appendLogMsg(msg);
+}
+
+void MainWindow::onTabChanged(int index)
+{
+    if (!camera_widget_) return;
+    QWidget *active = tab_widget_->widget(index);
+    if (active == tab4_ && tab4_) {
+        // Move camera onto the task-config dock.
+        tab4_->mountCamera(camera_widget_);
+    } else if (active == dashboard_tab_ && dash_left_splitter_) {
+        // Back home on the dashboard splitter — re-insert at index 0
+        // (above the log) so the original layout is restored.
+        if (camera_widget_->parentWidget() != dash_left_splitter_) {
+            camera_widget_->setParent(dash_left_splitter_);
+            dash_left_splitter_->insertWidget(0, camera_widget_);
+            dash_left_splitter_->setSizes({600, 200});
+            camera_widget_->show();
+        }
+    }
+    // Other tabs (接口配置 / 帮助): leave the camera wherever it last sat —
+    // the user will move it again by clicking back into 主控 or 任务配置.
 }
 
 void MainWindow::setLedColor(const QString &color)
