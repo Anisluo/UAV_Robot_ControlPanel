@@ -8,6 +8,8 @@
 #include "GripperWidget.h"
 #include "MeshMapWidget.h"
 #include "DroneWidget.h"
+#include "CalibWidget.h"
+#include "TeachWidget.h"
 #include "Tab2CommConfig.h"
 #include "Tab3Help.h"
 #include "Tab4TaskConfig.h"
@@ -264,9 +266,21 @@ QWidget* MainWindow::buildDashboardTab()
     drone_widget_   = new DroneWidget(rightContainer);
     drone_widget_->setDefaultTargetHost("192.168.1.101");
 
+    // Hand-eye calibration sits between the arm widget and the UGV widget —
+    // it pairs the on-board RealSense (RK3588 side) with the Piper flange
+    // and writes the result into proc_grasp's config.
+    calib_widget_ = new CalibWidget(rpc_client_, rightContainer);
+
+    // Teach-path recorder: capture J1-J6 (+ per-point gripper state) at
+    // operator-driven moments, save/load as JSON, replay onto the live arm.
+    // Sits next to CalibWidget — both are "training / setup" tools.
+    teach_widget_ = new TeachWidget(rpc_client_, rightContainer);
+
     rightLayout->addWidget(npu_widget_);
     rightLayout->addWidget(arm_widget_);
     rightLayout->addWidget(piper_widget_);   // hidden by default; revealed if backend=piper
+    rightLayout->addWidget(teach_widget_);   // 示教录制 / 回放
+    rightLayout->addWidget(calib_widget_);   // 手眼标定
     rightLayout->addWidget(ugv_widget_);
     rightLayout->addWidget(airport_widget_);
     rightLayout->addWidget(gripper_widget_);

@@ -16,6 +16,8 @@ class AirportWidget;
 class GripperWidget;
 class MeshMapWidget;
 class DroneWidget;
+class CalibWidget;
+class TeachWidget;
 class Tab2CommConfig;
 class Tab3Help;
 class Tab4TaskConfig;
@@ -84,6 +86,8 @@ private:
     GripperWidget *gripper_widget_;
     MeshMapWidget *mesh_widget_;
     DroneWidget   *drone_widget_;
+    CalibWidget   *calib_widget_   = nullptr;   // hand-eye calibration panel
+    TeachWidget   *teach_widget_   = nullptr;   // record / replay teach paths
 
     Tab2CommConfig  *tab2_;
     Tab3Help        *tab3_;
