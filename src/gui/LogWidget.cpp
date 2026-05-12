@@ -183,11 +183,27 @@ void LogWidget::appendLogMsg(const QString &msg)
     if (msg.startsWith("[RPC]") || msg.startsWith("[Video]")) {
         level = "INFO";
     }
-    if (msg.contains("error", Qt::CaseInsensitive) ||
-        msg.contains("Error", Qt::CaseInsensitive)) {
+    // Only flag as ERROR for genuine error contexts. The old substring test
+    // "contains('error')" was catching every JSON-RPC success that happened
+    // to carry "error_code":0 as a *payload field* (e.g. piper.get_status),
+    // turning the entire log line red even though nothing was wrong.
+    //
+    // What still counts as an error:
+    //   - our own emitters that explicitly prepend "[Error" / "[ERROR"
+    //   - RpcClient's own "Parse error" / "Socket error" diagnostics
+    //   - JSON-RPC 2.0 transport error shape: top-level `"error":{`
+    //
+    // What does NOT count:
+    //   - payload fields like "error_code":0 / "error_string":"" — these
+    //     have an underscore between "error" and the colon, so they don't
+    //     match `"\"error\":{`.
+    if (msg.contains("[Error", Qt::CaseInsensitive) ||
+        msg.contains("Parse error", Qt::CaseInsensitive) ||
+        msg.contains("Socket error", Qt::CaseInsensitive) ||
+        msg.contains("\"error\":{")) {
         level = "ERROR";
     }
-    if (msg.contains("warn", Qt::CaseInsensitive)) {
+    else if (msg.contains("warn", Qt::CaseInsensitive)) {
         level = "WARN";
     }
 
