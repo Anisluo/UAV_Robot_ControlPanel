@@ -11,6 +11,10 @@ class QListWidget;
 class QLabel;
 class QPushButton;
 class QSplitter;
+class QThread;
+class QSlider;
+class ArmViewer3D;
+class ArmSyncWorker;
 
 // Task Configuration Tab
 // Layout:
@@ -22,6 +26,7 @@ class Tab4TaskConfig : public QWidget {
     Q_OBJECT
 public:
     explicit Tab4TaskConfig(RpcClient *rpc, QWidget *parent = nullptr);
+    ~Tab4TaskConfig() override;
 
     void appendLog(const QString &level, const QString &msg);
     void setConnectionParams(const QString &host, quint16 rpc_port, quint16 vid_port);
@@ -36,11 +41,26 @@ private slots:
     void onStartResult(QJsonObject result);
     void onStopResult(QJsonObject result);
 
+    // Simulation controls — 3D-only, never touches the real arm.
+    void onSimulateTask();
+    void onSimReturnToLive();
+    void onSimTick();
+
 private:
     void buildUi();
-    QWidget* build3DPlaceholder();
+    QWidget* build3DViewer();
     QWidget* buildTaskPanel();
+    QWidget* buildSimPanel();
     void updateStatusFromBackend(const QJsonObject &status);
+
+    // Wires the sync worker: starts a QThread, asks worker to load STL
+    // assets and begin angle polling, and forwards viewer updates.
+    void start3DSimThread();
+    void stop3DSimThread();
+    // Called when the worker fires requestAngles(): does the actual RPC
+    // call (sockets must live on the main thread) and forwards the
+    // reply back to the worker.
+    void onAnglesRequested();
 
     RpcClient   *rpc_;
     QListWidget *task_list_;
@@ -51,6 +71,25 @@ private:
     QLabel      *task_status_label_;
     LogWidget   *log_widget_;
     class QTimer *poll_timer_;
+
+    // 3D simulation (all GUI-thread-owned references; worker lives in
+    // sim_thread_ via moveToThread).
+    ArmViewer3D   *viewer_3d_   = nullptr;
+    ArmSyncWorker *sim_worker_  = nullptr;
+    QThread       *sim_thread_  = nullptr;
+
+    // Standalone test controls — verify the 3D model animates without
+    // needing the live arm or any RPC connection.
+    QSlider     *joint_sliders_[6] = {nullptr};
+    QLabel      *joint_value_labels_[6] = {nullptr};
+    QPushButton *btn_sim_run_     = nullptr;
+    QPushButton *btn_sim_zero_    = nullptr;
+    QPushButton *btn_sim_live_    = nullptr;
+    QLabel      *sim_status_label_ = nullptr;
+    QTimer      *sim_timer_       = nullptr;
+    double       sim_t0_ms_       = 0.0;
+    bool         sim_mode_active_ = false;
+    QVector<QPair<float, QVector<float>>> sim_traj_;
 };
 
 #endif // TAB4TASKCONFIG_H

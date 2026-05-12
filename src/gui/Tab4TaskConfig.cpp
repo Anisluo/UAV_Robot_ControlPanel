@@ -1,5 +1,7 @@
 #include "Tab4TaskConfig.h"
 #include "LogWidget.h"
+#include "ArmViewer3D.h"
+#include "ArmSyncWorker.h"
 #include "core/RpcClient.h"
 #include "core/Protocol.h"
 
@@ -12,14 +14,35 @@
 #include <QListWidget>
 #include <QListWidgetItem>
 #include <QJsonObject>
+#include <QJsonArray>
 #include <QFrame>
 #include <QTimer>
+#include <QThread>
+#include <QCoreApplication>
+#include <QDir>
+#include <QSlider>
+#include <QVector3D>
+#include <QGroupBox>
+#include <QDateTime>
+#include <QSignalBlocker>
+#include <cmath>
 
 Tab4TaskConfig::Tab4TaskConfig(RpcClient *rpc, QWidget *parent)
     : QWidget(parent)
     , rpc_(rpc)
 {
+    // Register POD / container types for queued signals across threads.
+    qRegisterMetaType<ArmMeshCPU>("ArmMeshCPU");
+    qRegisterMetaType<QVector<QVector3D>>("QVector<QVector3D>");
+    qRegisterMetaType<QVector<float>>("QVector<float>");
+
     buildUi();
+    start3DSimThread();
+}
+
+Tab4TaskConfig::~Tab4TaskConfig()
+{
+    stop3DSimThread();
 }
 
 void Tab4TaskConfig::buildUi()
@@ -28,14 +51,23 @@ void Tab4TaskConfig::buildUi()
     outerLayout->setContentsMargins(6, 6, 6, 6);
     outerLayout->setSpacing(6);
 
-    // ── Main upper splitter (3D view | task panel) ────────────────────────
+    // Layout: (3D viewer above sim panel) | task panel.  Both splitter
+    // handles are draggable - user can resize viewer vs sliders on the
+    // left side, and the whole 3D column vs the task column.
     auto *mainSplitter = new QSplitter(Qt::Horizontal, this);
 
-    mainSplitter->addWidget(build3DPlaceholder());
+    auto *leftSplitter = new QSplitter(Qt::Vertical, mainSplitter);
+    leftSplitter->addWidget(build3DViewer());
+    leftSplitter->addWidget(buildSimPanel());
+    leftSplitter->setStretchFactor(0, 3);
+    leftSplitter->setStretchFactor(1, 1);
+    leftSplitter->setSizes({520, 260});
+
+    mainSplitter->addWidget(leftSplitter);
     mainSplitter->addWidget(buildTaskPanel());
-    mainSplitter->setStretchFactor(0, 2);
+    mainSplitter->setStretchFactor(0, 3);
     mainSplitter->setStretchFactor(1, 1);
-    mainSplitter->setSizes({700, 350});
+    mainSplitter->setSizes({760, 300});
 
     outerLayout->addWidget(mainSplitter, 3);
 
@@ -45,33 +77,198 @@ void Tab4TaskConfig::buildUi()
     outerLayout->addWidget(log_widget_, 1);
 }
 
-QWidget* Tab4TaskConfig::build3DPlaceholder()
+QWidget* Tab4TaskConfig::build3DViewer()
 {
     auto *frame = new QFrame(this);
     frame->setFrameShape(QFrame::StyledPanel);
     frame->setStyleSheet(
-        "QFrame { background-color: #1a1b2e; border: 1px solid #353650; border-radius: 4px; }");
+        "QFrame { background-color: #0f1018; border: 1px solid #353650; border-radius: 4px; }");
 
     auto *layout = new QVBoxLayout(frame);
     layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(0);
 
-    auto *placeholder = new QLabel(this);
-    placeholder->setText(
-        "<div style='text-align:center; color:#555770;'>"
-        "<div style='font-size:48px;'>⬡</div>"
-        "<div style='font-size:14px; margin-top:12px;'>3D 场景视图</div>"
-        "<div style='font-size:11px; margin-top:6px;'>小车 + 机械臂 + 平台目标云图</div>"
-        "<div style='font-size:10px; margin-top:4px;'>(待实现)</div>"
-        "</div>");
-    placeholder->setAlignment(Qt::AlignCenter);
-    layout->addWidget(placeholder);
+    viewer_3d_ = new ArmViewer3D(frame);
+    viewer_3d_->setStatusText(QStringLiteral("3D Scene (drag to orbit, scroll to zoom)"));
+    layout->addWidget(viewer_3d_, 1);
 
     return frame;
 }
 
+// (Old test bar lived here — replaced by buildSimPanel() on the right.)
+#if 0
+    // -- removed --
+    // Lets the user verify the model rotates without the live arm. The
+    // slider drives J1 directly (0..360°), and the sweep button triggers
+    // an automatic sine animation. Both feed viewer.setJointAngles() —
+    // exactly the same path the live RPC uses, so a working test bar
+    // proves the viewer + transforms are correct and any "doesn't move
+    // when arm moves" failure is upstream (RPC / network).
+    auto *testBar = new QFrame(frame);
+    testBar->setStyleSheet(
+        "QFrame { background-color: #16182a; border-top: 1px solid #353650; }"
+        "QLabel { color: #c8d0e8; }"
+        "QPushButton { background: #283154; color: #ffffff; "
+        "  border: 1px solid #4c5b88; border-radius: 3px; padding: 4px 10px; }"
+        "QPushButton:checked { background: #ff8a3c; color: #1a1a2e; }"
+        "QPushButton:hover { background: #364070; }");
+    auto *barLayout = new QHBoxLayout(testBar);
+    barLayout->setContentsMargins(8, 4, 8, 4);
+    barLayout->setSpacing(8);
+
+    barLayout->addWidget(new QLabel("测试 J1:", testBar));
+
+    test_slider_j1_ = new QSlider(Qt::Horizontal, testBar);
+    test_slider_j1_->setRange(0, 3600);   // tenths of a degree
+    test_slider_j1_->setValue(0);
+    test_slider_j1_->setMinimumWidth(180);
+    barLayout->addWidget(test_slider_j1_, 1);
+
+    test_angle_label_ = new QLabel("0.0°", testBar);
+    test_angle_label_->setMinimumWidth(50);
+    test_angle_label_->setStyleSheet("font-family: Consolas;");
+    barLayout->addWidget(test_angle_label_);
+
+    btn_test_sweep_ = new QPushButton("测试动画", testBar);
+    btn_test_sweep_->setCheckable(true);
+    btn_test_sweep_->setFixedHeight(24);
+    barLayout->addWidget(btn_test_sweep_);
+
+    layout->addWidget(testBar);
+
+    // Slider drag -> push J1 to viewer.
+    connect(test_slider_j1_, &QSlider::valueChanged, this,
+            [this](int v) {
+        const float deg = v / 10.0F;
+        test_angle_label_->setText(QString::number(deg, 'f', 1) + "°");
+        if (!viewer_3d_) return;
+        QVector<float> a(6, 0.0F);
+        a[0] = deg;
+        viewer_3d_->setJointAngles(a);
+    });
+
+    // Sweep timer -- sin wave 0..360 at 0.5 Hz, 33 ms tick (~30 fps).
+    test_sweep_timer_ = new QTimer(this);
+    test_sweep_timer_->setInterval(33);
+    connect(test_sweep_timer_, &QTimer::timeout, this, [this]() {
+        test_sweep_phase_ += 0.033F * 0.5F * 2.0F * float(M_PI);  // 0.5 Hz
+        const float deg = (1.0F + std::sin(test_sweep_phase_)) * 180.0F;
+        test_slider_j1_->setValue(int(deg * 10.0F));   // updates label + viewer
+    });
+
+    // (test sweep button — removed)
+#endif
+
+// ── 3D sim thread ───────────────────────────────────────────────────────
+// The worker lives on its own QThread and does the CPU-heavy STL parse
+// on startup plus a lightweight angle-poll timer.  Rendering stays on
+// the main thread because OpenGL contexts are thread-locked — what we
+// offload is the mesh I/O and the polling cadence, not the draw calls.
+void Tab4TaskConfig::start3DSimThread()
+{
+    if (sim_thread_) return;
+
+    sim_thread_ = new QThread(this);
+    sim_thread_->setObjectName("ArmSim");
+    sim_worker_ = new ArmSyncWorker();      // no parent — owned by its thread
+    sim_worker_->moveToThread(sim_thread_);
+
+    // Cleanup when the thread finishes.
+    connect(sim_thread_, &QThread::finished,
+            sim_worker_, &QObject::deleteLater);
+
+    // Worker → viewer (Qt::AutoConnection = QueuedConnection across threads).
+    connect(sim_worker_, &ArmSyncWorker::configReady,
+            this, [this](const QVector<QVector3D> &axes,
+                          const QVector<QVector3D> &origins,
+                          const QVector3D           &center,
+                          float                      radius) {
+        ArmViewer3D::Config cfg;
+        cfg.joint_axes    = axes;
+        cfg.joint_origins = origins;
+        cfg.scene_center  = center;
+        cfg.scene_radius  = radius;
+        viewer_3d_->setConfig(cfg);
+    });
+    connect(sim_worker_, &ArmSyncWorker::meshReady,
+            viewer_3d_,   &ArmViewer3D::addMeshCPU);
+    connect(sim_worker_, &ArmSyncWorker::anglesReady,
+            viewer_3d_,   &ArmViewer3D::setJointAngles);
+    connect(sim_worker_, &ArmSyncWorker::loadComplete,
+            this, [this](int n, QString status) {
+        appendLog("INFO",
+                  QStringLiteral("[3D] %1 (%2 个部件)")
+                      .arg(status).arg(n));
+    });
+    connect(sim_worker_, &ArmSyncWorker::logMessage,
+            this, [this](const QString &m) { appendLog("INFO", m); });
+
+    // Main-thread bridge: the worker can't poke the RpcClient directly
+    // (socket lives here); it just raises requestAngles() and we do the
+    // call here, piping the reply back to the worker for fan-out.
+    connect(sim_worker_, &ArmSyncWorker::requestAngles,
+            this,         &Tab4TaskConfig::onAnglesRequested);
+
+    sim_thread_->start();
+
+    // Ask the worker to load assets. The model lives next to the
+    // executable so a release build can ship without tools/.
+    const QString exeDir = QCoreApplication::applicationDirPath();
+    QDir d(exeDir);
+    QString model_dir = d.absoluteFilePath("assets/arm_model");
+    // Developer build: fall back to source tree if the deployed copy
+    // isn't where we expected (e.g. first-run from build_win/).
+    if (!QDir(model_dir).exists("arm_model.json")) {
+        d.cdUp(); d.cdUp();   // build_win/ -> project root
+        model_dir = d.absoluteFilePath("assets/arm_model");
+    }
+    QMetaObject::invokeMethod(sim_worker_, "loadAssets",
+                              Qt::QueuedConnection,
+                              Q_ARG(QString, model_dir));
+    QMetaObject::invokeMethod(sim_worker_, "startAnglePolling",
+                              Qt::QueuedConnection, Q_ARG(int, 200));
+}
+
+void Tab4TaskConfig::stop3DSimThread()
+{
+    if (!sim_thread_) return;
+    if (sim_worker_) {
+        QMetaObject::invokeMethod(sim_worker_, "stopAnglePolling",
+                                  Qt::BlockingQueuedConnection);
+    }
+    sim_thread_->quit();
+    sim_thread_->wait(2000);
+    sim_thread_  = nullptr;
+    sim_worker_  = nullptr;
+}
+
+void Tab4TaskConfig::onAnglesRequested()
+{
+    if (!rpc_ || !rpc_->isConnected() || !sim_worker_) return;
+    // arm.get_angles is the gateway-side method that forwards to
+    // proc_arm's arm.get_motor_angles (real encoder values) and unwraps
+    // the bare array as {"angles":[j1..j6]} in degrees. A transient
+    // error = silent skip — the next 200 ms tick retries.
+    rpc_->call(QStringLiteral("arm.get_angles"), QJsonObject{},
+        [this](QJsonObject reply) {
+            if (!sim_worker_) return;
+            const QJsonArray arr = reply.value("angles").toArray();
+            QVector<float> angles;
+            angles.reserve(arr.size());
+            for (const auto &v : arr) angles.append(float(v.toDouble()));
+            QMetaObject::invokeMethod(sim_worker_, "pushAngles",
+                                       Qt::QueuedConnection,
+                                       Q_ARG(QVector<float>, angles));
+        });
+}
+
+// Sim panel + trajectory data + sim event handlers — split out only to
+// keep this file readable.  Reads/writes the same Tab4TaskConfig members.
+#include "Tab4SimPanel.inc"
+
 QWidget* Tab4TaskConfig::buildTaskPanel()
 {
-    auto *grp = new QGroupBox("任务配置", this);
+    auto *grp = new QGroupBox("Task Configuration", this);
     auto *layout = new QVBoxLayout(grp);
     layout->setSpacing(8);
     layout->setContentsMargins(8, 18, 8, 8);

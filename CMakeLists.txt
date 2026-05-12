@@ -9,9 +9,14 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 set(CMAKE_AUTOUIC ON)
+# The MinGW-hosted moc 6.11 on Windows crashes (0xC0000005) when fed
+# moc_predefs.h alongside the GCC system include-path list — disabling
+# the predefs forwarding sidesteps the crash without losing anything
+# (we don't rely on compiler-specific macros inside any Q_OBJECT header).
+set(CMAKE_AUTOMOC_COMPILER_PREDEFINES OFF)
 
-find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Widgets Network)
-find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Widgets Network)
+find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Widgets Network OpenGLWidgets)
+find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Widgets Network OpenGLWidgets)
 
 file(GLOB_RECURSE HOSTGUI_SOURCES CONFIGURE_DEPENDS
     src/*.cpp
@@ -31,6 +36,16 @@ target_include_directories(HostGUI PRIVATE
 target_link_libraries(HostGUI PRIVATE
     Qt${QT_VERSION_MAJOR}::Widgets
     Qt${QT_VERSION_MAJOR}::Network
+    Qt${QT_VERSION_MAJOR}::OpenGLWidgets
+)
+
+# Copy arm_model assets next to the exe so runtime can find them without
+# the source tree. Idempotent — CMake checks mtimes.
+add_custom_command(TARGET HostGUI POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${CMAKE_CURRENT_SOURCE_DIR}/assets"
+            "$<TARGET_FILE_DIR:HostGUI>/assets"
+    COMMENT "Staging arm_model assets next to HostGUI.exe"
 )
 
 if(MSVC)

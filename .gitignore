@@ -17,3 +17,6 @@ compile_commands.json
 *.user
 *.pro.user
 *.autosave
+
+# Large CAD redundancies (zip just duplicates the STEP)
+steps/*.zip
