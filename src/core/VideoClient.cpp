@@ -116,12 +116,16 @@ private:
             const qint64 elapsed = fps_timer_.elapsed();
             if (elapsed >= 1000) {
                 const double fps = frame_count_ * 1000.0 / elapsed;
+                // Only fire fpsUpdated() (status-bar widget consumes it).
+                // The "[Video] Receiving frames: N fps" log line used to
+                // be emitted every second — at 16 minutes runtime that's
+                // ~960 lines that pushed every other [RPC] / [backend]
+                // event off the bottom of LogWidget's 2000-line buffer.
+                // The status bar already shows the live fps; the log
+                // entry is pure noise. Dropped.
                 QMetaObject::invokeMethod(owner_,
                                           [owner = owner_, fps]() {
                                               emit owner->fpsUpdated(fps);
-                                              emit owner->logMessage(
-                                                  QString("[Video] Receiving frames: %1 fps")
-                                                      .arg(fps, 0, 'f', 1));
                                           },
                                           Qt::QueuedConnection);
                 frame_count_ = 0;
