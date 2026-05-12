@@ -186,16 +186,19 @@ void Tab2CommConfig::buildUi()
     QWidget *m_rs      = buildRealsenseBox();    module_groups_.append(m_rs);
     QWidget *m_npu     = buildNpuBox();          module_groups_.append(m_npu);
     QWidget *m_grip    = buildGripperUartBox();  module_groups_.append(m_grip);
+    // 3-column layout: 8 modules → 3 rows (3 + 3 + 2). Wider screen, less
+    // vertical scrolling.
     grid->addWidget(m_host,    0, 0);
     grid->addWidget(m_arm,     0, 1);
-    grid->addWidget(m_car,     1, 0);
-    grid->addWidget(m_aprail,  1, 1);
-    grid->addWidget(m_aprelay, 2, 0);
-    grid->addWidget(m_rs,      2, 1);
-    grid->addWidget(m_npu,     3, 0);
-    grid->addWidget(m_grip,    3, 1);
+    grid->addWidget(m_car,     0, 2);
+    grid->addWidget(m_aprail,  1, 0);
+    grid->addWidget(m_aprelay, 1, 1);
+    grid->addWidget(m_rs,      1, 2);
+    grid->addWidget(m_npu,     2, 0);
+    grid->addWidget(m_grip,    2, 1);
     grid->setColumnStretch(0, 1);
     grid->setColumnStretch(1, 1);
+    grid->setColumnStretch(2, 1);
     outer->addLayout(grid);
     outer->addStretch();
 

@@ -21,8 +21,8 @@ const QVector<TaskStage>& TaskFlowWidget::stages() {
             {"monitor_ready",  "监视位姿",      "—"},
         }},
         {"VISION", "视觉定位", 2, 1, {
-            {"uav_centered",   "UAV 居中",     "—"},
-            {"uav_static",     "UAV 静止",     "—"},
+            {"uav_centered",   "UAV 搜索",     "—"},
+            {"uav_static",     "UAV 定位",     "—"},
         }},
         {"LOCK", "机场锁定",   3, 1, {
             {"uav_landed",     "降落到位",      "—"},
@@ -353,12 +353,52 @@ void TaskFlowWidget::markError(const QString &state_id, const QString &err) {
 void TaskFlowWidget::resetAll() {
     status_.clear();
     current_state_.clear();
+    selected_state_.clear();
     for (const auto &stage : stages()) {
         for (const auto &sig : stage.entries) {
             status_[stage.id][sig.id] = SignalStatus{SignalState::Pending, QString(), QString()};
         }
     }
     update();
+}
+
+void TaskFlowWidget::setSelectedState(const QString &state_id) {
+    // 把传入的 state_id 解析成它所属的 stage_id,然后整个卡片高亮.
+    selected_state_ = state_id;
+    int s_idx = -1, k_idx = -1;
+    QString new_stage;
+    if (!state_id.isEmpty() && resolveState(state_id, &s_idx, &k_idx) && s_idx >= 0) {
+        new_stage = stages()[s_idx].id;
+    }
+    if (selected_stage_ == new_stage) return;
+    selected_stage_ = new_stage;
+    update();
+}
+
+void TaskFlowWidget::setSelectedStage(const QString &stage_id) {
+    if (selected_stage_ == stage_id) return;
+    selected_stage_ = stage_id;
+    selected_state_.clear();
+    update();
+}
+
+QString TaskFlowWidget::stageOfState(const QString &state_id) {
+    for (const auto &m : legacyMap()) {
+        if (state_id == QLatin1String(m.state)) {
+            return QString::fromLatin1(m.stage);
+        }
+    }
+    return QString();
+}
+
+QVector<QString> TaskFlowWidget::statesInStage(const QString &stage_id) {
+    QVector<QString> out;
+    for (const auto &m : legacyMap()) {
+        if (stage_id == QLatin1String(m.stage)) {
+            out.append(QString::fromLatin1(m.state));
+        }
+    }
+    return out;
 }
 
 void TaskFlowWidget::setSignal(const QString &stage_id,
@@ -489,6 +529,8 @@ void TaskFlowWidget::paintEvent(QPaintEvent *) {
     if (geom_.isEmpty()) recomputeGeometry();
     const auto &sl = stages();
 
+    // (selected_state_ + selected_signal_idx 残留变量已废弃 — 现在按 stage 高亮)
+
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing);
     p.fillRect(rect(), QColor(0x14, 0x18, 0x22));
@@ -599,6 +641,17 @@ void TaskFlowWidget::paintEvent(QPaintEvent *) {
         p.setPen(ep);
         p.drawRoundedRect(g.card_rect, 8, 8);
 
+        // 单步模式选中: 整张卡片外圈再画一道黄色虚线作为选中标识. 比信号
+        // 行级高亮更直观, 也匹配"一步 = 一个卡片"的语义.
+        if (!selected_stage_.isEmpty() && stage.id == selected_stage_) {
+            QPen yp(QColor(0xff, 0xeb, 0x3b));
+            yp.setWidth(3);
+            yp.setStyle(Qt::DashLine);
+            p.setPen(yp);
+            p.setBrush(Qt::NoBrush);
+            p.drawRoundedRect(g.card_rect.adjusted(-3, -3, 3, 3), 10, 10);
+        }
+
         // Title bar
         QRectF tr(g.card_rect.left(), g.card_rect.top(), g.card_rect.width(), kTitleH);
         QLinearGradient grad(tr.topLeft(), tr.bottomLeft());
@@ -672,29 +725,35 @@ void TaskFlowWidget::paintEvent(QPaintEvent *) {
 // ────────────────────────────────────────────────────────────────────────
 
 void TaskFlowWidget::mousePressEvent(QMouseEvent *event) {
+    // 默认整个流程图是 read-only HMI 显示, 鼠标点击不触发任何动作 —
+    // 避免操作员误碰 / 鼠标蹭过去触发执行. 只有 Tab4 切到单步模式时
+    // setClickEnabled(true) 才允许点击选卡片.
+    if (!click_enabled_) return;
     if (event->button() != Qt::LeftButton) return;
+
     const QPointF p = event->position();
+    // 单步模式选中粒度 = 整张卡片. 只要点击命中 card_rect (包括标题栏 "1
+    // 初始化" / "2 视觉定位" 等),就发出该卡片**第一个**子状态的 legacy
+    // state_id; Tab4 那边会自动解析成 stage_id 并把整张卡片高亮 + 把该
+    // stage 下所有子状态加入待执行队列.
     for (int i = 0; i < geom_.size(); ++i) {
         if (!geom_[i].card_rect.contains(p)) continue;
         const auto &stage = stages()[i];
-        for (int k = 0; k < stage.entries.size(); ++k) {
-            if (!geom_[i].signal_rects[k].contains(p)) continue;
-            const QString sgid = stage.entries[k].id;
-            for (const auto &m : legacyMap()) {
-                if (stage.id == QLatin1String(m.stage) &&
-                    sgid    == QLatin1String(m.signal)) {
-                    emit stationClicked(QString::fromLatin1(m.state));
-                    return;
-                }
-            }
-        }
         for (const auto &m : legacyMap()) {
             if (stage.id == QLatin1String(m.stage)) {
                 emit stationClicked(QString::fromLatin1(m.state));
                 return;
             }
         }
+        return;
     }
+}
+
+void TaskFlowWidget::setClickEnabled(bool enabled) {
+    if (click_enabled_ == enabled) return;
+    click_enabled_ = enabled;
+    // 单步模式下把光标变成手型,提示卡片可点;否则恢复箭头
+    setCursor(enabled ? Qt::PointingHandCursor : Qt::ArrowCursor);
 }
 
 void TaskFlowWidget::mouseMoveEvent(QMouseEvent *event) {

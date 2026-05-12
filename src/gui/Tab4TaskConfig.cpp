@@ -355,12 +355,15 @@ QWidget* Tab4TaskConfig::buildTaskPanel()
     auto *mode_box = new QButtonGroup(grp);
     mode_sim_radio_  = new QRadioButton("模拟", grp);
     mode_real_radio_ = new QRadioButton("实机", grp);
+    mode_step_radio_ = new QRadioButton("单步", grp);
     mode_sim_radio_->setChecked(true);
     mode_box->addButton(mode_sim_radio_,  0);
     mode_box->addButton(mode_real_radio_, 1);
+    mode_box->addButton(mode_step_radio_, 2);
     bar->addWidget(new QLabel("模式:", grp));
     bar->addWidget(mode_sim_radio_);
     bar->addWidget(mode_real_radio_);
+    bar->addWidget(mode_step_radio_);
     bar->addSpacing(20);
 
     btn_flow_start_ = new QPushButton("▶ 开始", grp);
@@ -421,6 +424,7 @@ QWidget* Tab4TaskConfig::buildTaskPanel()
     // ── Signal wiring ────────────────────────────────────────────────────
     connect(mode_sim_radio_,  &QRadioButton::toggled, this, &Tab4TaskConfig::onFlowModeChanged);
     connect(mode_real_radio_, &QRadioButton::toggled, this, &Tab4TaskConfig::onFlowModeChanged);
+    connect(mode_step_radio_, &QRadioButton::toggled, this, &Tab4TaskConfig::onFlowModeChanged);
     connect(btn_flow_start_, &QPushButton::clicked,   this, &Tab4TaskConfig::onFlowStart);
     connect(btn_flow_stop_,  &QPushButton::clicked,   this, &Tab4TaskConfig::onFlowStop);
     connect(btn_flow_reset_, &QPushButton::clicked,   this, &Tab4TaskConfig::onFlowReset);
@@ -611,19 +615,50 @@ void Tab4TaskConfig::onFlowModeChanged()
     if (flow_running_) {
         // Don't allow mode change mid-flight — operator likely meant to stop first.
         appendLog("warn", "正在运行中, 请先停止再切换模式");
-        // Revert the toggle visually without re-firing the signal.
         QSignalBlocker b1(mode_sim_radio_);
         QSignalBlocker b2(mode_real_radio_);
+        QSignalBlocker b3(mode_step_radio_);
         mode_sim_radio_->setChecked(flow_simulating_);
         mode_real_radio_->setChecked(!flow_simulating_);
+        mode_step_radio_->setChecked(false);
         return;
     }
-    const bool sim = mode_sim_radio_->isChecked();
-    flow_status_label_->setText(QString("就绪 · 模式: %1").arg(sim ? "模拟" : "实机"));
+    const bool step = mode_step_radio_->isChecked();
+    if (flow_widget_) flow_widget_->setClickEnabled(step);   // ← 只在单步模式接收点击
+    if (step) {
+        // 单步调试模式: 复用 开始/停止 按钮做"执行选中"/"跳过"
+        btn_flow_start_->setText("▶ 执行选中");
+        btn_flow_stop_->setText("⏭ 跳过(标完成)");
+        btn_flow_start_->setEnabled(true);
+        btn_flow_stop_->setEnabled(true);
+        flow_status_label_->setText(
+            flow_step_selected_stage_.isEmpty()
+                ? "单步调试 · 在流程图中点击一张卡片选取步骤"
+                : QString("单步调试 · 已选: %1 · 点 ▶ 全部执行").arg(flow_step_selected_stage_));
+    } else {
+        btn_flow_start_->setText("▶ 开始");
+        btn_flow_stop_->setText("⏸ 停止");
+        btn_flow_start_->setEnabled(true);
+        btn_flow_stop_->setEnabled(false);
+        const bool sim = mode_sim_radio_->isChecked();
+        flow_status_label_->setText(QString("就绪 · 模式: %1").arg(sim ? "模拟" : "实机"));
+        // 切出单步时清掉选中高亮 + 终止可能在跑的子状态序列
+        if (step_advance_timer_) step_advance_timer_->stop();
+        flow_step_run_idx_ = -1;
+        flow_step_selected_stage_.clear();
+        flow_step_states_to_run_.clear();
+        if (flow_widget_) flow_widget_->setSelectedStage(QString());
+    }
 }
 
 void Tab4TaskConfig::onFlowStart()
 {
+    // 单步模式: 复用"开始"按钮做"执行选中步" - 不走全流程逻辑
+    if (mode_step_radio_ && mode_step_radio_->isChecked()) {
+        onFlowStepExecute();
+        return;
+    }
+
     if (flow_running_) return;
     flow_widget_->resetAll();
 
@@ -675,6 +710,11 @@ void Tab4TaskConfig::onFlowStart()
 
 void Tab4TaskConfig::onFlowStop()
 {
+    // 单步模式: 复用"停止"按钮做"跳过当前选中步"
+    if (mode_step_radio_ && mode_step_radio_->isChecked()) {
+        onFlowStepSkip();
+        return;
+    }
     if (!flow_running_) return;
     appendLog("info", "停止任务流程");
     if (flow_simulating_) {
@@ -797,12 +837,161 @@ void Tab4TaskConfig::onSwapStatusPoll()
 
 void Tab4TaskConfig::onFlowStationClicked(QString state_id)
 {
-    // Future: jump-to-step / inspect detail panel. For now just log it.
+    // 单步模式: 点击信号行解析出它所属的 stage(整张卡片), 高亮整卡片.
+    // 其他模式: 已经在 TaskFlowWidget 那一层禁用了点击, 不会到这里.
+    if (mode_step_radio_ && mode_step_radio_->isChecked()) {
+        const QString stage_id = TaskFlowWidget::stageOfState(state_id);
+        if (stage_id.isEmpty()) return;
+
+        flow_step_selected_stage_ = stage_id;
+        flow_step_states_to_run_  = TaskFlowWidget::statesInStage(stage_id);
+        if (flow_widget_) flow_widget_->setSelectedStage(stage_id);
+
+        // Find this stage's title for the status bar.
+        QString stage_title = stage_id;
+        for (const auto &st : TaskFlowWidget::stages()) {
+            if (st.id == stage_id) { stage_title = st.title; break; }
+        }
+        flow_status_label_->setText(
+            QString("单步: 选中 [%1] · 含 %2 个子状态 · 点 ▶ 全部执行")
+                .arg(stage_title)
+                .arg(flow_step_states_to_run_.size()));
+        appendLog("info",
+            QString("选中步骤: %1 (含 %2 个子状态)")
+                .arg(stage_title).arg(flow_step_states_to_run_.size()));
+        return;
+    }
+
+    // 兜底 (基本不会走到): 仅日志
     for (const auto &s : TaskFlowWidget::states()) {
         if (s.id == state_id) {
             appendLog("info", QString("点击节点: %1 (%2)").arg(s.label, s.desc));
             return;
         }
     }
+}
+
+// ── 单步模式: 把选中 stage 下所有 sub-state 依次执行 ─────────────────
+void Tab4TaskConfig::onFlowStepExecute()
+{
+    if (flow_step_selected_stage_.isEmpty() || flow_step_states_to_run_.isEmpty()) {
+        appendLog("warn", "请先在流程图中点击一张卡片选取整个步骤");
+        flow_status_label_->setText("单步: ⚠ 未选中任何步骤");
+        return;
+    }
+    if (!rpc_ || !rpc_->isConnected()) {
+        appendLog("error", "RPC 未连接, 无法执行");
+        return;
+    }
+    if (flow_step_run_idx_ >= 0) {
+        appendLog("warn", "上一次单步还没跑完, 请等待或按 停止");
+        return;
+    }
+
+    // Start from index 0. onFlowStepAdvance() drives each sub-state via a
+    // 1500 ms timer; we kick the first one immediately for snappier feel.
+    flow_step_run_idx_ = 0;
+    flow_status_label_->setText(
+        QString("单步执行 [%1]  1/%2").arg(flow_step_selected_stage_)
+                                      .arg(flow_step_states_to_run_.size()));
+
+    if (!step_advance_timer_) {
+        step_advance_timer_ = new QTimer(this);
+        step_advance_timer_->setInterval(1500);  // per-substate
+        connect(step_advance_timer_, &QTimer::timeout,
+                this, &Tab4TaskConfig::onFlowStepAdvance);
+    }
+
+    // Fire substate 0 right now, then start the timer for the rest.
+    onFlowStepAdvance();
+    step_advance_timer_->start();
+
+    btn_flow_start_->setEnabled(false);
+    btn_flow_stop_->setText("⏹ 停止单步");
+}
+
+void Tab4TaskConfig::onFlowStepAdvance()
+{
+    if (flow_step_run_idx_ < 0 ||
+        flow_step_run_idx_ >= flow_step_states_to_run_.size()) {
+        // Done — mark last as Done, reset state.
+        if (!flow_step_states_to_run_.isEmpty()) {
+            flow_widget_->markFinished(flow_step_states_to_run_.last());
+        }
+        if (step_advance_timer_) step_advance_timer_->stop();
+        flow_step_run_idx_ = -1;
+        btn_flow_start_->setEnabled(true);
+        btn_flow_stop_->setText("⏭ 跳过(标完成)");
+        flow_status_label_->setText(
+            QString("✓ 步骤 %1 执行完成").arg(flow_step_selected_stage_));
+        appendLog("info", QString("✓ 步骤完成: %1").arg(flow_step_selected_stage_));
+        return;
+    }
+
+    const QString sid = flow_step_states_to_run_[flow_step_run_idx_];
+    const auto &states = TaskFlowWidget::states();
+    int s_idx = -1;
+    for (int i = 0; i < states.size(); ++i) {
+        if (states[i].id == sid) { s_idx = i; break; }
+    }
+    if (s_idx < 0 || states[s_idx].demo_joints_deg.size() != 6) {
+        appendLog("warn", "跳过(无效子状态): " + sid);
+        ++flow_step_run_idx_;
+        return;
+    }
+
+    const TaskState &s = states[s_idx];
+    QJsonObject params;
+    QJsonArray jarr;
+    for (float v : s.demo_joints_deg) jarr.append(v);
+    params[Protocol::Fields::JOINTS] = jarr;
+    rpc_->call(Protocol::Methods::ARM_MOVE_JOINTS, params);
+
+    flow_widget_->setCurrentState(s.id);
+
+    appendLog("info", QString("▶ 子状态 %1/%2: %3")
+                        .arg(flow_step_run_idx_ + 1)
+                        .arg(flow_step_states_to_run_.size())
+                        .arg(s.label));
+    flow_status_label_->setText(
+        QString("单步执行 [%1]  %2/%3  %4")
+            .arg(flow_step_selected_stage_)
+            .arg(flow_step_run_idx_ + 1)
+            .arg(flow_step_states_to_run_.size())
+            .arg(s.label));
+
+    ++flow_step_run_idx_;
+}
+
+void Tab4TaskConfig::onFlowStepSkip()
+{
+    // 执行中: 终止, 当前 stage 全部标完成
+    if (flow_step_run_idx_ >= 0) {
+        if (step_advance_timer_) step_advance_timer_->stop();
+        for (const QString &sid : flow_step_states_to_run_) {
+            flow_widget_->markFinished(sid);
+        }
+        flow_step_run_idx_ = -1;
+        btn_flow_start_->setEnabled(true);
+        btn_flow_stop_->setText("⏭ 跳过(标完成)");
+        appendLog("warn",
+            QString("⏹ 终止单步执行 [%1]").arg(flow_step_selected_stage_));
+        flow_status_label_->setText(
+            QString("已终止 [%1] · 已标全部完成").arg(flow_step_selected_stage_));
+        return;
+    }
+
+    // 待机中: 把选中 stage 全部标完成不执行
+    if (flow_step_selected_stage_.isEmpty() || flow_step_states_to_run_.isEmpty()) {
+        appendLog("warn", "请先选中一张卡片再跳过");
+        return;
+    }
+    for (const QString &sid : flow_step_states_to_run_) {
+        flow_widget_->markFinished(sid);
+    }
+    appendLog("info",
+        QString("⏭ 跳过(标记完成): %1").arg(flow_step_selected_stage_));
+    flow_status_label_->setText(
+        QString("已跳过 [%1] · 选下一张卡片继续").arg(flow_step_selected_stage_));
 }
 

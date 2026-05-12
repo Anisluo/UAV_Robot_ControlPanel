@@ -3,6 +3,7 @@
 
 #include <QWidget>
 #include <QString>
+#include <QVector>
 #include <QJsonObject>
 
 class RpcClient;
@@ -68,6 +69,12 @@ private slots:
     void onSwapStatusPoll();          // 2 Hz polling in real mode
     void onFlowStationClicked(QString state_id);
 
+    // 单步调试模式: 流程图上选一张卡片(stage), "执行选中" 把该 stage 下
+    // 所有 sub-state 依次通过 arm.move_joints 发到真机, 1.5 秒每一步.
+    void onFlowStepExecute();
+    void onFlowStepSkip();
+    void onFlowStepAdvance();   // QTimer 触发, 把执行索引向后推
+
 private:
     void buildUi();
     QWidget* build3DViewer();
@@ -122,6 +129,11 @@ private:
     TaskFlowWidget *flow_widget_      = nullptr;
     QRadioButton   *mode_sim_radio_   = nullptr;
     QRadioButton   *mode_real_radio_  = nullptr;
+    QRadioButton   *mode_step_radio_  = nullptr;   // 单步调试 (实机, 一次一步)
+    QString         flow_step_selected_stage_;     // 当前选中的"步骤" (stage_id)
+    QVector<QString> flow_step_states_to_run_;     // 选中 stage 下所有 state_id, 顺序
+    int              flow_step_run_idx_ = -1;      // 当前执行到第几个 (在 to_run_ 里的索引)
+    class QTimer   *step_advance_timer_ = nullptr; // 在子状态间推进的计时器
     QPushButton    *btn_flow_start_   = nullptr;
     QPushButton    *btn_flow_stop_    = nullptr;
     QPushButton    *btn_flow_reset_   = nullptr;

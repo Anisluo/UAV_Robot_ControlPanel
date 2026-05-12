@@ -83,6 +83,25 @@ public:
                    SignalState state,
                    const QString &dyn_text = QString());
 
+    // 单步模式选中: 高亮"整个卡片(stage)", 而不是单条信号. 传入 state_id
+    // 会自动解析出它所属的 stage 并高亮; 传入 "" 清空选中.
+    void setSelectedState(const QString &state_id);
+    void setSelectedStage(const QString &stage_id);
+    QString selectedState() const { return selected_state_; }
+    QString selectedStage() const { return selected_stage_; }
+
+    // 工具方法: 给一个 legacy state_id ("GRAB_LIGHT"), 返回它的 stage_id
+    // ("GRAB"). 找不到返回空字符串.
+    static QString stageOfState(const QString &state_id);
+    // 工具方法: 给一个 stage_id, 返回该 stage 下所有 legacy state_id, 顺序
+    // 跟 states() 表里保持一致(也就是执行顺序).
+    static QVector<QString> statesInStage(const QString &stage_id);
+
+    // 默认 false: 整个流程图是只读显示, 鼠标点击什么都不做(避免误操作).
+    // Tab4 切到"单步"模式时把它开成 true, 退出单步再关回 false.
+    void setClickEnabled(bool enabled);
+    bool isClickEnabled() const { return click_enabled_; }
+
     QSize sizeHint() const override { return {1100, 420}; }
 
 signals:
@@ -123,6 +142,9 @@ private:
     // status_[stage_id][signal_id] = SignalStatus
     QHash<QString, QHash<QString, SignalStatus>> status_;
     QString  current_state_;       // last setCurrentState arg (legacy)
+    QString  selected_state_;      // (legacy, 兼容; 当前等于 selected_stage_)
+    QString  selected_stage_;      // 单步模式选中的整个卡片 stage_id, 空 = 无
+    bool     click_enabled_ = false;
 
     QVector<StageGeom> geom_;      // index aligned with stages()
     QRectF             block1_rect_;   // 取电池 frame
