@@ -15,14 +15,27 @@ constexpr quint16 VIDEO_PORT = 7002;
 // Method name constants
 namespace Methods {
     constexpr const char* SYSTEM_PING        = "system.ping";
+    constexpr const char* SYSTEM_GET_BACKEND = "system.get_backend";  // {backend: "piper"|"legacy", model: ...}
     constexpr const char* ARM_SET_JOINTS     = "arm.set_joints";
     constexpr const char* ARM_GET_ANGLES     = "arm.get_angles";
+    constexpr const char* ARM_GET_POSE       = "arm.get_pose";        // [x,y,z, rx,ry,rz] mm/deg
     constexpr const char* ARM_JOG            = "arm.jog";
     constexpr const char* ARM_HOME           = "arm.home";
     constexpr const char* ARM_HOME_JOINT     = "arm.home_joint";
     constexpr const char* ARM_MOVE_JOINT     = "arm.move_joint";
+    constexpr const char* ARM_MOVE_JOINTS    = "arm.move_joints";
+    constexpr const char* ARM_MOVE_XYZ       = "arm.move_xyz";
+    constexpr const char* ARM_MOVE_POSE6D    = "arm.move_pose6d";
+    constexpr const char* ARM_MOVE_LINEAR    = "arm.move_linear_xyz_rotation";
     constexpr const char* ARM_STOP           = "arm.stop";
+    constexpr const char* ARM_EMERGENCY_STOP = "arm.emergency_stop";
     constexpr const char* ARM_SET_SPEEDS     = "arm.set_speeds";
+    // Piper-specific (gen-2 backend only)
+    constexpr const char* PIPER_HANDSHAKE         = "piper.handshake";
+    constexpr const char* PIPER_PARK_ZERO         = "piper.park_zero";
+    constexpr const char* PIPER_GET_STATUS        = "piper.get_status";
+    constexpr const char* PIPER_SET_GRIPPER_ANGLE = "piper.set_gripper_angle";
+    constexpr const char* PIPER_MOVE_CARTESIAN    = "piper.move_cartesian";
     constexpr const char* UGV_SET_VELOCITY   = "ugv.set_velocity";
     constexpr const char* UGV_STOP           = "ugv.stop";
     constexpr const char* AIRPORT_SET_RAIL   = "airport.set_rail";

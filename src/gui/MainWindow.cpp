@@ -2,6 +2,7 @@
 #include "CameraWidget.h"
 #include "LogWidget.h"
 #include "ArmWidget.h"
+#include "PiperWidget.h"
 #include "UGVWidget.h"
 #include "AirportWidget.h"
 #include "GripperWidget.h"
@@ -166,6 +167,10 @@ QWidget* MainWindow::buildDashboardTab()
     // Sub-system widgets
     npu_widget_     = new NpuWidget(rpc_client_, rightContainer);
     arm_widget_     = new ArmWidget(rpc_client_, rightContainer);
+    piper_widget_   = new PiperWidget(rpc_client_, rightContainer);
+    // Default state: show legacy arm widget; the system.get_backend probe
+    // in onRpcConnected() flips to PiperWidget if gateway reports piper.
+    piper_widget_->hide();
     ugv_widget_     = new UGVWidget(rpc_client_, rightContainer);
     airport_widget_ = new AirportWidget(rpc_client_, rightContainer);
     gripper_widget_ = new GripperWidget(rpc_client_, rightContainer);
@@ -175,6 +180,7 @@ QWidget* MainWindow::buildDashboardTab()
 
     rightLayout->addWidget(npu_widget_);
     rightLayout->addWidget(arm_widget_);
+    rightLayout->addWidget(piper_widget_);   // hidden by default; revealed if backend=piper
     rightLayout->addWidget(ugv_widget_);
     rightLayout->addWidget(airport_widget_);
     rightLayout->addWidget(gripper_widget_);
@@ -307,12 +313,32 @@ void MainWindow::onRpcConnected()
     setLedColor("#4caf50");
     status_label_->setText("已连接: " + host_edit_->text());
 
-    // Push the persisted speed overrides to the backend so the freshly
-    // (re)started proc_arm honors what the GUI is showing for move/zero RPM
-    // instead of falling back to compiled defaults.
-    if (arm_widget_) {
-        arm_widget_->pushSpeeds();
-    }
+    // ── Backend probe: decide arm widget to display ──────────────────
+    // The gateway forwards system.get_backend → proc_piper (gen-2) or
+    // returns {"backend":"legacy"} for the old proc_arm path. We swap
+    // the visible arm widget accordingly. Default state (set in
+    // buildDashboardTab) shows ArmWidget; we only flip to PiperWidget
+    // on a confirmed "piper" response.
+    rpc_client_->call(Protocol::Methods::SYSTEM_GET_BACKEND, QJsonObject{},
+        [this](QJsonObject reply) {
+            const QString backend = reply.value("backend").toString("legacy").toLower();
+            const bool is_piper = (backend == "piper");
+            if (is_piper) {
+                if (arm_widget_)     arm_widget_->hide();
+                if (gripper_widget_) gripper_widget_->hide();   // Piper has built-in gripper
+                if (piper_widget_) {
+                    piper_widget_->show();
+                    piper_widget_->onRpcConnected();
+                }
+                if (log_widget_) onLogMessage("[backend] gen-2 piper detected, showing PiperWidget");
+            } else {
+                if (piper_widget_)   piper_widget_->hide();
+                if (arm_widget_)     arm_widget_->show();
+                if (gripper_widget_) gripper_widget_->show();
+                if (arm_widget_)     arm_widget_->pushSpeeds();
+                if (log_widget_) onLogMessage("[backend] legacy proc_arm detected, showing ArmWidget");
+            }
+        });
 
     // Start polling NPU detections so the camera view shows bounding boxes.
     if (det_timer_ == nullptr) {
@@ -392,6 +418,8 @@ void MainWindow::onRpcDisconnected()
 
     if (det_timer_) det_timer_->stop();
     camera_widget_->setDetections({});
+
+    if (piper_widget_) piper_widget_->onRpcDisconnected();
 }
 
 void MainWindow::pollDetections()
@@ -521,9 +549,10 @@ void MainWindow::loadConfig()
 
     // ----- Delegate to children that know how to persist themselves -----
     if (tab2_) tab2_->loadConfig(s);
-    if (arm_widget_) arm_widget_->loadConfig(s);
-    if (ugv_widget_) ugv_widget_->loadConfig(s);
-    if (npu_widget_) npu_widget_->loadConfig(s);
+    if (arm_widget_)   arm_widget_->loadConfig(s);
+    if (piper_widget_) piper_widget_->loadConfig(s);
+    if (ugv_widget_)   ugv_widget_->loadConfig(s);
+    if (npu_widget_)   npu_widget_->loadConfig(s);
 }
 
 void MainWindow::saveConfig() const
@@ -544,9 +573,10 @@ void MainWindow::saveConfig() const
     s.endGroup();
 
     if (tab2_) tab2_->saveConfig(s);
-    if (arm_widget_) arm_widget_->saveConfig(s);
-    if (ugv_widget_) ugv_widget_->saveConfig(s);
-    if (npu_widget_) npu_widget_->saveConfig(s);
+    if (arm_widget_)   arm_widget_->saveConfig(s);
+    if (piper_widget_) piper_widget_->saveConfig(s);
+    if (ugv_widget_)   ugv_widget_->saveConfig(s);
+    if (npu_widget_)   npu_widget_->saveConfig(s);
 
     s.sync();
 }

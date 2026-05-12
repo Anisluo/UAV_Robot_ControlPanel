@@ -10,6 +10,7 @@ class MeshPinger;
 class CameraWidget;
 class LogWidget;
 class ArmWidget;
+class PiperWidget;
 class UGVWidget;
 class AirportWidget;
 class GripperWidget;
@@ -71,6 +72,7 @@ private:
     CameraWidget *camera_widget_;
     LogWidget    *log_widget_;
     ArmWidget    *arm_widget_;
+    PiperWidget  *piper_widget_ = nullptr;   // gen-2 arm widget (shown when backend=piper)
     UGVWidget    *ugv_widget_;
     AirportWidget *airport_widget_;
     GripperWidget *gripper_widget_;
