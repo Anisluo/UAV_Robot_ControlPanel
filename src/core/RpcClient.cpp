@@ -16,14 +16,15 @@ RpcClient::RpcClient(QObject *parent)
     connect(socket_, &QTcpSocket::disconnected, this, &RpcClient::onDisconnected);
     connect(socket_, &QTcpSocket::readyRead,    this, &RpcClient::onReadyRead);
     connect(socket_, &QAbstractSocket::errorOccurred, this, &RpcClient::onError);
-    connect(socket_, &QAbstractSocket::stateChanged, this,
-            [this](QAbstractSocket::SocketState state) {
-                emit logMessage(QString("[RPC] State changed: %1").arg(static_cast<int>(state)));
-            });
-    connect(socket_, &QTcpSocket::bytesWritten, this,
-            [this](qint64 bytes) {
-                emit logMessage(QString("[RPC] bytesWritten=%1").arg(bytes));
-            });
+    // Note: we used to also log every stateChanged and bytesWritten event,
+    // but bytesWritten fires for *every* socket flush — including those of
+    // the high-rate polls the upper layer now silences — so it was flooding
+    // the GUI with "[RPC] bytesWritten=N" lines after the recent throttling
+    // patch. Neither signal carries operator-useful info (the actual TX
+    // content + transitions in onConnected/onDisconnected/onError already
+    // tell us everything that matters), so drop both. If they ever need
+    // to come back for debugging, gate them behind an env var like
+    // QT_DEBUG_RPCCLIENT.
 }
 
 void RpcClient::setHost(const QString &host, quint16 port)
