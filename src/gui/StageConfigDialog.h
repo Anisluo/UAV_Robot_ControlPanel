@@ -97,15 +97,11 @@ private:
     QDoubleSpinBox *gr_angle_  = nullptr;
     QSpinBox       *gr_force_  = nullptr;
 
-    // AIRPORT_RAIL
-    QSpinBox       *ar_rail_   = nullptr;
-    QDoubleSpinBox *ar_pos_    = nullptr;
-    QSpinBox       *ar_speed_  = nullptr;
-
-    // AIRPORT_RAIL_STALL  (runs until backend stall monitor stops the motor)
-    QComboBox      *ars_action_  = nullptr;  // lock / release / rail2_fwd / rail2_back
-    QSpinBox       *ars_speed_   = nullptr;  // rpm magnitude
-    QSpinBox       *ars_max_ms_  = nullptr;  // GUI upper bound before advancing
+    // AIRPORT_RAIL — rail-1+3 pair lock/release, stall-driven
+    // (mirrors the 锁定/释放 buttons in AirportWidget)
+    QComboBox      *ar_action_ = nullptr;   // "lock" | "release"
+    QSpinBox       *ar_speed_  = nullptr;   // rpm
+    QSpinBox       *ar_max_ms_ = nullptr;   // GUI upper bound before advancing
 
     // AIRPORT_GRIPPER
     QCheckBox      *ag_open_   = nullptr;
