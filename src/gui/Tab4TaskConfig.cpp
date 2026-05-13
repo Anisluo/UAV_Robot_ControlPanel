@@ -1006,35 +1006,77 @@ void Tab4TaskConfig::onFlowStepAdvance()
     }
 
     const TaskState &s = states[s_idx];
+
+    // Per-stage configured-script overlay (mirrors what onFlowSimTick
+    // does for the sim path). If the operator recorded a TaskStep
+    // script via the ⚙ stage-config dialog, prefer that over the
+    // hardcoded demo poses. Before this overlay, "执行选中" silently
+    // ran the canned TaskFlowWidget demo poses regardless of what the
+    // operator had recorded — the recorded points were only honoured
+    // in simulation mode.
+    QVector<float> target_joints = s.demo_joints_deg;
+    double speed_ratio = 0.30;    // default 30%
+    const QString stage_id = TaskFlowWidget::stageOfState(sid);
+    if (!stage_id.isEmpty() && stage_scripts_.contains(stage_id)) {
+        const QVector<QString> stage_states = TaskFlowWidget::statesInStage(stage_id);
+        const int pos_in_stage = stage_states.indexOf(sid);
+        const auto &script = stage_scripts_[stage_id];
+        QVector<int> mj_step_indices;
+        for (int si = 0; si < script.size(); ++si) {
+            if (script[si].type == StepType::MOVE_JOINTS) mj_step_indices.append(si);
+        }
+        if (pos_in_stage >= 0 && pos_in_stage < mj_step_indices.size()) {
+            const TaskStep &step = script[mj_step_indices[pos_in_stage]];
+            const QVariantList j = step.params.value("joints").toList();
+            if (j.size() == 6) {
+                target_joints.resize(6);
+                for (int i = 0; i < 6; ++i) target_joints[i] = float(j[i].toDouble());
+                speed_ratio = step.params.value("speed_ratio", 0.30).toDouble();
+                if (pos_in_stage == 0) {
+                    appendLog("info", QString("使用录制脚本 [%1] (含 %2 步)")
+                                         .arg(stage_id).arg(script.size()));
+                }
+            }
+        }
+    }
+
     QJsonObject params;
     QJsonArray jarr;
-    for (float v : s.demo_joints_deg) jarr.append(v);
+    for (float v : target_joints) jarr.append(v);
     params[Protocol::Fields::JOINTS] = jarr;
-    rpc_->call(Protocol::Methods::ARM_MOVE_JOINTS, params);
+    params["speed_ratio"] = speed_ratio;
+    rpc_->call(Protocol::Methods::ARM_MOVE_JOINTS, params,
+        [this](QJsonObject reply) {
+            if (!reply.value("ok").toBool(true)) {
+                const QString err = reply.value("error").toString();
+                appendLog("warn", QString("⚠ move_joints 拒绝: %1").arg(err));
+            }
+        });
 
-    // Dynamically extend timer interval if this step's max joint
-    // delta from the previous step is large. Hardcoded 1500 ms was
-    // too short for >30° moves at 30% speed — the next tick fired
-    // before the arm reached, target got overwritten, arm landed
-    // visibly short. Estimate: 0.6 × speed_pct °/s + 500ms buffer.
+    // Dynamically extend timer interval based on actual joint delta.
+    // Hardcoded 1500 ms was too short for >30° moves at 30% speed —
+    // the next tick fired before the arm reached, target got
+    // overwritten, arm landed visibly short. Estimate from speed_ratio
+    // (Piper at 100% ≈ 60°/s, so deg_per_s ≈ 60 * speed_ratio).
     if (step_advance_timer_) {
         float max_delta = 0.0f;
         if (!flow_step_prev_joints_.isEmpty()) {
-            for (int i = 0; i < 6 && i < flow_step_prev_joints_.size() && i < s.demo_joints_deg.size(); ++i) {
-                max_delta = std::max(max_delta, std::abs(s.demo_joints_deg[i] - flow_step_prev_joints_[i]));
+            for (int i = 0; i < 6 && i < flow_step_prev_joints_.size() && i < target_joints.size(); ++i) {
+                max_delta = std::max(max_delta, std::abs(target_joints[i] - flow_step_prev_joints_[i]));
             }
         }
-        const int speed_pct = 30;   // TODO: pull from piper.get_status if available
-        const float deg_per_s = 0.6f * float(speed_pct);
+        const float deg_per_s = float(60.0 * std::max(0.05, speed_ratio));
         const int travel_ms = int(max_delta * 1000.0f / deg_per_s);
         const int dyn_step_ms = std::max(1500, travel_ms + 500);
         step_advance_timer_->setInterval(dyn_step_ms);
         if (max_delta > 0.0f) {
-            appendLog("info", QString("  estimated travel %1° → step %2 ms")
-                                  .arg(max_delta, 0, 'f', 1).arg(dyn_step_ms));
+            appendLog("info", QString("  travel %1°, speed_ratio=%2 → step %3 ms")
+                                  .arg(max_delta, 0, 'f', 1)
+                                  .arg(speed_ratio, 0, 'f', 2)
+                                  .arg(dyn_step_ms));
         }
     }
-    flow_step_prev_joints_ = s.demo_joints_deg;   // remember for next step's delta
+    flow_step_prev_joints_ = target_joints;   // remember for next step's delta
 
     flow_widget_->setCurrentState(s.id);
 
