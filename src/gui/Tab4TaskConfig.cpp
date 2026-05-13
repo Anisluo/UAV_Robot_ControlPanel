@@ -58,16 +58,18 @@ void Tab4TaskConfig::buildUi()
     outerLayout->setContentsMargins(6, 6, 6, 6);
     outerLayout->setSpacing(6);
 
-    // Layout: (3D viewer above sim panel) | task panel.  Both splitter
-    // handles are draggable - user can resize viewer vs sliders on the
-    // left side, and the whole 3D column vs the task column.
+    // Create the log widget FIRST so buildTaskPanel()'s startup-log calls
+    // (e.g. "loaded N saved scripts") have a live target. Adding it to the
+    // outerLayout last is fine — Qt layouts are independent of construction
+    // order.
+    log_widget_ = new LogWidget(rpc_, this);
+    log_widget_->setMinimumHeight(70);
+    log_widget_->setMaximumHeight(110);
+
     auto *mainSplitter = new QSplitter(Qt::Horizontal, this);
 
     auto *leftSplitter = new QSplitter(Qt::Vertical, mainSplitter);
     leftSplitter->addWidget(build3DViewer());
-    // The bottom slot used to host buildSimPanel() (joint sliders / sweep
-    // buttons). It is now a passive dock that the MainWindow reparents the
-    // shared CameraWidget into on tab switch.
     leftSplitter->addWidget(buildCameraDock());
     leftSplitter->setStretchFactor(0, 3);
     leftSplitter->setStretchFactor(1, 1);
@@ -75,24 +77,11 @@ void Tab4TaskConfig::buildUi()
 
     mainSplitter->addWidget(leftSplitter);
     mainSplitter->addWidget(buildTaskPanel());
-    // Flow chart is the main feature now → give it the bigger half.
     mainSplitter->setStretchFactor(0, 2);
     mainSplitter->setStretchFactor(1, 5);
     mainSplitter->setSizes({420, 1000});
 
-    // Give the flow chart row more vertical space — bumping the
-    // mainSplitter stretch factor (was 3) means the log gets a smaller
-    // slice and the 9-card flow chart fits without clipping.
     outerLayout->addWidget(mainSplitter, 6);
-
-    // ── Bottom: log ───────────────────────────────────────────────────────
-    // The log panel used to grab ~25% of the tab; the new flow chart needs
-    // more vertical room, so we shrink the log to a 3-line peek and let
-    // the user expand it manually via the splitter handle if they want
-    // deeper output.
-    log_widget_ = new LogWidget(rpc_, this);
-    log_widget_->setMinimumHeight(70);
-    log_widget_->setMaximumHeight(110);
     outerLayout->addWidget(log_widget_, 1);
 }
 
@@ -618,7 +607,7 @@ void Tab4TaskConfig::onStopResult(QJsonObject result)
 
 void Tab4TaskConfig::appendLog(const QString &level, const QString &msg)
 {
-    log_widget_->appendLog(level, msg);
+    if (log_widget_) log_widget_->appendLog(level, msg);
 }
 
 void Tab4TaskConfig::setConnectionParams(const QString &host, quint16 rpc_port, quint16 vid_port)

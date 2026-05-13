@@ -105,8 +105,8 @@ private:
     QPushButton *btn_estop_;     // big red emergency stop
     QPushButton *btn_reset_;
     QLabel      *task_status_label_;
-    LogWidget   *log_widget_;
-    class QTimer *poll_timer_;
+    LogWidget   *log_widget_ = nullptr;
+    class QTimer *poll_timer_ = nullptr;
 
     // 3D simulation (all GUI-thread-owned references; worker lives in
     // sim_thread_ via moveToThread).
