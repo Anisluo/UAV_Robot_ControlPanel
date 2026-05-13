@@ -357,9 +357,42 @@ void StageConfigDialog::onAddStep()
     // sensible defaults
     switch (s.type) {
         case StepType::MOVE_JOINTS:
+            // MOVE_JOINTS gets pre-populated with the LIVE arm pose
+            // (via arm.get_angles RPC) so the new step represents
+            // "current position" instead of all-zeros. Operators
+            // were confused when they added a step, typed a note,
+            // and the joints stayed at 0 — they expected the new
+            // row to capture wherever the arm was at click time.
+            // RPC unavailable → fall back to all-zeros so the dialog
+            // still works offline.
             s.params["joints"]      = QVariantList{0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
             s.params["speed_ratio"] = 0.30;
-            break;
+            steps_.append(s);
+            refreshList();
+            list_->setCurrentRow(steps_.size() - 1);
+            // Now overwrite with live angles asynchronously
+            if (rpc_ && rpc_->isConnected()) {
+                const int row_added = steps_.size() - 1;
+                rpc_->call(Protocol::Methods::ARM_GET_ANGLES, QJsonObject{},
+                    [this, row_added](QJsonObject reply) {
+                        const auto arr = reply.value(Protocol::Fields::ANGLES).toArray();
+                        if (arr.size() != 6) return;
+                        if (row_added < 0 || row_added >= steps_.size()) return;
+                        QVariantList j; for (const auto &v : arr) j << v.toDouble();
+                        steps_[row_added].params["joints"] = j;
+                        // Refresh the row label AND, if it's still selected,
+                        // re-populate the editor so the operator sees the
+                        // live values rather than the stale zeros.
+                        if (auto *item = list_->item(row_added)) {
+                            item->setText(stepRowText(row_added, steps_[row_added]));
+                        }
+                        if (list_->currentRow() == row_added) {
+                            showRow(row_added);
+                        }
+                    });
+            }
+            return;     // step + RPC handled above
+        case StepType::MOVE_CARTESIAN:
         case StepType::MOVE_CARTESIAN:
             s.params["x_mm"] = 58.0; s.params["y_mm"] = 0.0;  s.params["z_mm"] = 213.0;
             s.params["rx_deg"] = 0.0; s.params["ry_deg"] = 85.0; s.params["rz_deg"] = 0.0;
