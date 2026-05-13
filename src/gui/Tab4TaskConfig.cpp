@@ -1122,6 +1122,9 @@ void Tab4TaskConfig::onFlowStepAdvance()
 //   DWELL           → no RPC, just wait `ms` ms
 //   AIRPORT_GRIPPER → airport.lock / airport.release  (~2s)
 //   AIRPORT_RAIL    → airport.set_rail  (~3s)
+//   AIRPORT_RAIL_STALL → airport.lock / .release / .set_speed; backend
+//                        stall monitor cuts motor on jam; GUI waits
+//                        step.max_ms before advancing.
 //   WAIT_DETECT_*   → currently skipped with a log (TODO: poll)
 void Tab4TaskConfig::dispatchScriptStep(const TaskStep &step)
 {
@@ -1230,6 +1233,41 @@ void Tab4TaskConfig::dispatchScriptStep(const TaskStep &step)
             appendLog("info",
                 QString("▶ [%1/%2] AIRPORT_RAIL rail=%3 → %4mm%5")
                     .arg(step_num).arg(total).arg(rail).arg(pos_mm, 0, 'f', 1).arg(note));
+            break;
+        }
+        case StepType::AIRPORT_RAIL_STALL: {
+            const QString action = step.params.value("action", "lock").toString();
+            const int speed_rpm  = step.params.value("speed_rpm", 1500).toInt();
+            const int max_ms     = std::max(500, step.params.value("max_ms", 7000).toInt());
+            QString name;
+            if (action == "lock") {
+                QJsonObject p;
+                p[Protocol::Fields::SPEED_RPM] = speed_rpm;
+                rpc_->call(Protocol::Methods::AIRPORT_LOCK, p, cb_log_err);
+                name = "锁定(1+3)";
+            } else if (action == "release") {
+                QJsonObject p;
+                p[Protocol::Fields::SPEED_RPM] = speed_rpm;
+                rpc_->call(Protocol::Methods::AIRPORT_RELEASE, p, cb_log_err);
+                name = "释放(1+3)";
+            } else if (action == "rail2_fwd" || action == "rail2_back") {
+                QJsonObject p;
+                p[Protocol::Fields::RAIL] = 1;     // backend index 1 = UI rail 2
+                p[Protocol::Fields::SPEED_RPM] =
+                    (action == "rail2_fwd") ? speed_rpm : -speed_rpm;
+                rpc_->call(Protocol::Methods::AIRPORT_SET_SPEED, p, cb_log_err);
+                name = (action == "rail2_fwd") ? "导轨2 前进" : "导轨2 后退";
+            } else {
+                appendLog("warn",
+                    QString("第 %1 步 AIRPORT_RAIL_STALL 动作未知: %2, 跳过")
+                        .arg(step_num).arg(action));
+                duration_ms = 100;
+                break;
+            }
+            duration_ms = max_ms;
+            appendLog("info",
+                QString("▶ [%1/%2] AIRPORT_RAIL_STALL %3 @ %4rpm  最长 %5ms (堵转自动停)%6")
+                    .arg(step_num).arg(total).arg(name).arg(speed_rpm).arg(max_ms).arg(note));
             break;
         }
         case StepType::MOVE_CARTESIAN:

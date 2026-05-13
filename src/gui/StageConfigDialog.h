@@ -102,6 +102,11 @@ private:
     QDoubleSpinBox *ar_pos_    = nullptr;
     QSpinBox       *ar_speed_  = nullptr;
 
+    // AIRPORT_RAIL_STALL  (runs until backend stall monitor stops the motor)
+    QComboBox      *ars_action_  = nullptr;  // lock / release / rail2_fwd / rail2_back
+    QSpinBox       *ars_speed_   = nullptr;  // rpm magnitude
+    QSpinBox       *ars_max_ms_  = nullptr;  // GUI upper bound before advancing
+
     // AIRPORT_GRIPPER
     QCheckBox      *ag_open_   = nullptr;
 

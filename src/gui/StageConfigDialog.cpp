@@ -75,7 +75,7 @@ void StageConfigDialog::buildUi()
 
     auto *add_row = new QHBoxLayout;
     cmb_add_ = new QComboBox(this);
-    for (int t = int(StepType::MOVE_JOINTS); t <= int(StepType::DWELL); ++t) {
+    for (int t = int(StepType::MOVE_JOINTS); t <= int(StepType::AIRPORT_RAIL_STALL); ++t) {
         cmb_add_->addItem(TaskStep::typeLabel(StepType(t)), int(t));
     }
     btn_add_  = new QPushButton(QStringLiteral("+ 加步骤"), this);
@@ -317,6 +317,46 @@ void StageConfigDialog::buildEditPanels()
         f->addRow(QStringLiteral("时长"), dw_ms_);
         editor_stack_->insertWidget(int(StepType::DWELL), w);
     }
+
+    // 8 AIRPORT_RAIL_STALL  (run until backend stall monitor stops the motor)
+    {
+        auto *w = new QWidget(this);
+        auto *f = new QFormLayout(w);
+        f->setContentsMargins(8, 8, 8, 8);
+
+        ars_action_ = new QComboBox(w);
+        ars_action_->addItem(QStringLiteral("导轨 1+3 锁定"),       "lock");
+        ars_action_->addItem(QStringLiteral("导轨 1+3 释放"),       "release");
+        ars_action_->addItem(QStringLiteral("导轨 2 前进"),         "rail2_fwd");
+        ars_action_->addItem(QStringLiteral("导轨 2 后退"),         "rail2_back");
+
+        ars_speed_ = new QSpinBox(w);
+        ars_speed_->setRange(50, 3000);
+        ars_speed_->setValue(1500);
+        ars_speed_->setSuffix("rpm");
+
+        ars_max_ms_ = new QSpinBox(w);
+        ars_max_ms_->setRange(1000, 60000);
+        ars_max_ms_->setValue(7000);
+        ars_max_ms_->setSingleStep(500);
+        ars_max_ms_->setSuffix("ms");
+
+        connect(ars_action_, QOverload<int>::of(&QComboBox::currentIndexChanged),
+                this, &StageConfigDialog::onParamChanged);
+        connect(ars_speed_, QOverload<int>::of(&QSpinBox::valueChanged),
+                this, &StageConfigDialog::onParamChanged);
+        connect(ars_max_ms_, QOverload<int>::of(&QSpinBox::valueChanged),
+                this, &StageConfigDialog::onParamChanged);
+
+        f->addRow(QStringLiteral("动作"), ars_action_);
+        f->addRow(QStringLiteral("速度"), ars_speed_);
+        f->addRow(QStringLiteral("最长等待"), ars_max_ms_);
+        f->addRow(new QLabel(
+            QStringLiteral("<i>电机会一直走直到 proc_gateway 检测到堵转 (status 0x04/0x08)<br>"
+                           "或读 CAN 失败 8 次。GUI 等待最长 max_ms 后继续下一步。</i>"),
+            w));
+        editor_stack_->insertWidget(int(StepType::AIRPORT_RAIL_STALL), w);
+    }
 }
 
 
@@ -416,6 +456,11 @@ void StageConfigDialog::onAddStep()
             break;
         case StepType::DWELL:
             s.params["ms"] = 1000;
+            break;
+        case StepType::AIRPORT_RAIL_STALL:
+            s.params["action"]    = "lock";
+            s.params["speed_rpm"] = 1500;
+            s.params["max_ms"]    = 7000;
             break;
     }
     steps_.append(s);
@@ -535,6 +580,15 @@ void StageConfigDialog::showRow(int row)
         case StepType::DWELL:
             dw_ms_->setValue(s.params.value("ms", 1000).toInt());
             break;
+        case StepType::AIRPORT_RAIL_STALL: {
+            const QString action = s.params.value("action", "lock").toString();
+            int idx = ars_action_->findData(action);
+            if (idx < 0) idx = 0;
+            ars_action_->setCurrentIndex(idx);
+            ars_speed_->setValue(s.params.value("speed_rpm", 1500).toInt());
+            ars_max_ms_->setValue(s.params.value("max_ms", 7000).toInt());
+            break;
+        }
     }
 
     for (auto *e : editors) e->blockSignals(false);
@@ -584,6 +638,11 @@ void StageConfigDialog::readEditorsTo(TaskStep &s)
             break;
         case StepType::DWELL:
             s.params["ms"] = dw_ms_->value();
+            break;
+        case StepType::AIRPORT_RAIL_STALL:
+            s.params["action"]    = ars_action_->currentData().toString();
+            s.params["speed_rpm"] = ars_speed_->value();
+            s.params["max_ms"]    = ars_max_ms_->value();
             break;
     }
 }

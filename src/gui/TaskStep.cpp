@@ -20,6 +20,7 @@ QString TaskStep::typeLabel(StepType t)
         case StepType::WAIT_DETECT_UAV: return QStringLiteral("等待识别UAV");
         case StepType::WAIT_DETECT_BAT: return QStringLiteral("等待识别电池");
         case StepType::DWELL:           return QStringLiteral("延时");
+        case StepType::AIRPORT_RAIL_STALL: return QStringLiteral("机场导轨(堵转停)");
     }
     return QStringLiteral("?");
 }
@@ -73,6 +74,17 @@ QString TaskStep::summary() const
                 .arg(params.value("timeout_ms").toInt() / 1000.0, 0, 'f', 1);
         case StepType::DWELL:
             return QStringLiteral("%1 ms").arg(params.value("ms").toInt());
+        case StepType::AIRPORT_RAIL_STALL: {
+            const QString action = params.value("action", "lock").toString();
+            const int rpm = params.value("speed_rpm", 1500).toInt();
+            QString name;
+            if      (action == "lock")        name = QStringLiteral("锁定(1+3)");
+            else if (action == "release")     name = QStringLiteral("释放(1+3)");
+            else if (action == "rail2_fwd")   name = QStringLiteral("导轨2 前进");
+            else if (action == "rail2_back")  name = QStringLiteral("导轨2 后退");
+            else                              name = QStringLiteral("(未知动作)");
+            return QStringLiteral("%1 @ %2rpm  → 堵转停").arg(name).arg(rpm);
+        }
     }
     return {};
 }
