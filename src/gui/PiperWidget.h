@@ -55,7 +55,6 @@ private slots:
     void onEnableClicked();     // piper.handshake (re-do CAN_CTRL handshake)
     void onEmergencyStopClicked();
     void onHomeClicked();       // arm.home (MoveJ to all-zero)
-    void onTeachClicked();      // toggle drag-teach via piper.set_teach_mode
     void onSpeedChanged(int pct);
 
     // ── joint tab ─────────────────────────────────────────────────────
@@ -114,8 +113,6 @@ private:
     QPushButton  *enable_btn_    = nullptr;
     QPushButton  *estop_btn_     = nullptr;
     QPushButton  *home_btn_      = nullptr;
-    QPushButton  *teach_btn_     = nullptr;   // 示教 toggle
-    bool          teach_active_  = false;     // mirrors firmware teach_status
 
     // main tabs
     QTabWidget   *tabs_          = nullptr;

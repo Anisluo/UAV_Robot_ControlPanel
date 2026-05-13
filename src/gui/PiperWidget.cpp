@@ -137,16 +137,14 @@ void PiperWidget::buildLayout() {
     home_btn_->setStyleSheet("QPushButton { padding:4px 12px; }");
     top_layout->addWidget(home_btn_);
 
-    // 示教 — toggle drag-teach via the same firmware path the physical
-    // button uses (MotionCtrl_1 grag_teach_ctrl 0x01/0x02). Background
-    // colour flips when teach is active so the operator sees the live
-    // state even without looking at the status bar.
-    teach_btn_ = new QPushButton("示教", top_frame);
-    teach_btn_->setCheckable(true);
-    teach_btn_->setStyleSheet("QPushButton { padding:4px 12px; }"
-                              "QPushButton:checked { background:#e08; color:white; font-weight:bold; }");
-    teach_btn_->setToolTip("点击进入拖动示教模式 (电机失力,可手动拖动机械臂记录点位)\n再次点击退出, 恢复 CAN_CTRL");
-    top_layout->addWidget(teach_btn_);
+    // No software 示教 toggle: Piper V1.8-2 firmware doesn't expose a CAN
+    // command that enters the real ctrl_mode=0x02 TEACHING state with
+    // gravity comp — only the physical drag-teach button on the arm body
+    // can trigger that. The status bar still surfaces TEACHING when the
+    // operator presses the physical button, so HostGUI shows ground truth
+    // either way. Tested SDK paths: MotionCtrl_1, MasterSlaveConfig,
+    // DisableArm, raw 0x151 with ctrl_mode=0x02 — none of them flip the
+    // firmware into the correct mode.
 
     estop_btn_ = new QPushButton("急停", top_frame);
     estop_btn_->setStyleSheet("QPushButton { background:#c33; color:white; font-weight:bold; padding:4px 14px; }");
@@ -434,7 +432,6 @@ void PiperWidget::connectSignals() {
     connect(enable_btn_,  &QPushButton::clicked, this, &PiperWidget::onEnableClicked);
     connect(estop_btn_,   &QPushButton::clicked, this, &PiperWidget::onEmergencyStopClicked);
     connect(home_btn_,    &QPushButton::clicked, this, &PiperWidget::onHomeClicked);
-    connect(teach_btn_,   &QPushButton::clicked, this, &PiperWidget::onTeachClicked);
 
     // joint tab
     for (int i = 0; i < 6; ++i) {
@@ -576,15 +573,6 @@ void PiperWidget::onHomeClicked() {
     rpc_->call(Protocol::Methods::ARM_HOME, QJsonObject{}, nullptr);
 }
 
-void PiperWidget::onTeachClicked() {
-    // Toggle: button's "checked" state reflects where we WANT to go.
-    // updateStatusBar() rewrites the visual state from firmware feedback so
-    // even if the RPC fails, the operator sees ground truth.
-    const bool enable = teach_btn_->isChecked();
-    QJsonObject p; p["enable"] = enable;
-    rpc_->call("piper.set_teach_mode", p, nullptr);
-}
-
 void PiperWidget::onSpeedChanged(int pct) {
     // Map 1-100% to joint_dps via proc_piper's heuristic (100% ≈ 200 dps).
     QJsonObject p;
@@ -710,27 +698,16 @@ void PiperWidget::updatePoseReadouts(const std::array<double, 6> &p) {
 }
 
 void PiperWidget::updateStatusBar(int ctrl_mode, int arm_status, int /*mode_feed*/,
-                                   int motion_status, int teach_status, bool hb) {
+                                   int motion_status, int /*teach_status*/, bool hb) {
+    // The "控制" cell already shows TEACHING vs CAN_CTRL vs STANDBY based
+    // on the firmware's reported ctrl_mode (see ctrlModeText). That's the
+    // single source of truth for the operator — no software toggle here.
     status_ctrl_  ->setText(QString("控制: %1").arg(ctrlModeText(ctrl_mode)));
     status_arm_   ->setText(QString("状态: %1").arg(armStatusText(arm_status)));
     status_motion_->setText(QString("运动: %1").arg(motionStatusText(motion_status)));
     status_heartbeat_->setText(QString("心跳: %1").arg(hb ? "活" : "❌"));
     status_heartbeat_->setStyleSheet(hb ? "color:#3a8; font-family:monospace;"
                                         : "color:#c44; font-family:monospace;");
-
-    // Sync the teach toggle with the firmware. Drives the button from
-    // teach_status so the physical drag-teach button on the arm body
-    // updates the UI just like the software toggle would. Block signals
-    // while flipping checked state so we don't re-fire onTeachClicked.
-    const bool fw_teach = (teach_status != 0) || (ctrl_mode == 0x02);
-    if (fw_teach != teach_active_) {
-        teach_active_ = fw_teach;
-        if (teach_btn_) {
-            const QSignalBlocker block(teach_btn_);
-            teach_btn_->setChecked(fw_teach);
-            teach_btn_->setText(fw_teach ? "退出示教" : "示教");
-        }
-    }
 }
 
 QString PiperWidget::ctrlModeText(int m) const {
