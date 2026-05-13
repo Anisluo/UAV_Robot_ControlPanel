@@ -44,7 +44,7 @@ const char *gripperStateColor(TeachWidget::GripperState s) {
 }
 
 TeachWidget::TeachWidget(RpcClient *rpc, QWidget *parent)
-    : QGroupBox(QStringLiteral("示教路径 (录点 / 回放)"), parent)
+    : QGroupBox(QStringLiteral("轨迹跟踪 (标记 / 回放)"), parent)
     , rpc_(rpc)
 {
     setStyleSheet(
@@ -72,7 +72,7 @@ void TeachWidget::buildUi()
     // ── Row 1: record / delete / clear ───────────────────────────────
     auto *row1 = new QHBoxLayout;
     row1->setSpacing(4);
-    btn_record_ = new QPushButton(QStringLiteral("📍 录点"), this);
+    btn_record_ = new QPushButton(QStringLiteral("📍 标记"), this);
     btn_delete_ = new QPushButton(QStringLiteral("✂ 删所选"), this);
     btn_clear_  = new QPushButton(QStringLiteral("🗑 清空"), this);
     btn_record_->setFixedHeight(28);
@@ -230,7 +230,7 @@ void TeachWidget::onRecordPoint()
         [this](QJsonObject reply) {
             const QJsonArray arr = reply.value(Protocol::Fields::ANGLES).toArray();
             if (arr.size() != 6) {
-                appendLog(QStringLiteral("录点失败: arm.get_angles 返回非 6 元素"));
+                appendLog(QStringLiteral("标记失败: arm.get_angles 返回非 6 元素"));
                 return;
             }
             Waypoint w;
@@ -242,7 +242,7 @@ void TeachWidget::onRecordPoint()
             w.dwell_ms = 0;
             waypoints_.append(w);
             rebuildList();
-            appendLog(QStringLiteral("✓ 录入第 %1 点").arg(waypoints_.size()));
+            appendLog(QStringLiteral("✓ 标记第 %1 点").arg(waypoints_.size()));
         });
 }
 
@@ -275,7 +275,7 @@ void TeachWidget::onSaveToFile()
     }
     bool ok = false;
     const QString name = QInputDialog::getText(this,
-        QStringLiteral("保存示教"),
+        QStringLiteral("保存轨迹"),
         QStringLiteral("轨迹名称:"),
         QLineEdit::Normal,
         QStringLiteral("teach_%1")
@@ -284,7 +284,7 @@ void TeachWidget::onSaveToFile()
     if (!ok || name.isEmpty()) return;
 
     const QString path = QFileDialog::getSaveFileName(this,
-        QStringLiteral("保存示教文件"),
+        QStringLiteral("保存轨迹文件"),
         name + ".json",
         QStringLiteral("JSON (*.json)"));
     if (path.isEmpty()) return;
@@ -323,7 +323,7 @@ void TeachWidget::onSaveToFile()
 void TeachWidget::onLoadFromFile()
 {
     const QString path = QFileDialog::getOpenFileName(this,
-        QStringLiteral("加载示教文件"), QString(), QStringLiteral("JSON (*.json)"));
+        QStringLiteral("加载轨迹文件"), QString(), QStringLiteral("JSON (*.json)"));
     if (path.isEmpty()) return;
     QFile f(path);
     if (!f.open(QIODevice::ReadOnly)) {
