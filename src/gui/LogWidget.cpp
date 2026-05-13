@@ -14,6 +14,7 @@
 #include <QTextBlock>
 #include <QTimer>
 #include <QJsonObject>
+#include <QSettings>
 
 namespace {
 // Display name → backend `source` token sent to system.get_logs.
@@ -63,6 +64,21 @@ LogWidget::LogWidget(RpcClient *rpc, QWidget *parent)
     filter_combo_ = new QComboBox(this);
     filter_combo_->addItems({"全部", "信息", "警告", "错误"});
     filter_combo_->setFixedWidth(80);
+    // Default to ERROR-only so the panel doesn't flood with routine INFO
+    // traces (RPC connect/disconnect, step-by-step progress, etc.). User
+    // can flip to 信息/全部 from the dropdown when debugging; the choice
+    // is persisted in QSettings.
+    {
+        QSettings s;
+        const QString saved = s.value("LogWidget/levelFilter", "错误").toString();
+        int idx = filter_combo_->findText(saved);
+        filter_combo_->setCurrentIndex(idx >= 0 ? idx : 3);
+    }
+    connect(filter_combo_, &QComboBox::currentTextChanged,
+            this, [](const QString &text) {
+        QSettings s;
+        s.setValue("LogWidget/levelFilter", text);
+    });
     toolbar->addWidget(filter_combo_);
 
     toolbar->addStretch();
