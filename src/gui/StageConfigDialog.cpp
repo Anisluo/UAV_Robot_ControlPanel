@@ -393,7 +393,6 @@ void StageConfigDialog::onAddStep()
             }
             return;     // step + RPC handled above
         case StepType::MOVE_CARTESIAN:
-        case StepType::MOVE_CARTESIAN:
             s.params["x_mm"] = 58.0; s.params["y_mm"] = 0.0;  s.params["z_mm"] = 213.0;
             s.params["rx_deg"] = 0.0; s.params["ry_deg"] = 85.0; s.params["rz_deg"] = 0.0;
             s.params["mode"] = "P";
