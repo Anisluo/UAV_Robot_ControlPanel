@@ -67,6 +67,7 @@ private:
     void appendLog(const QString &msg);
     void executeStep(int idx);
     void startReplayConfirmed();    // continuation after pre-flight ctrl_mode check
+    void finishReplay(bool send_arm_stop, const QString &log_msg);
 
     RpcClient *rpc_;
 

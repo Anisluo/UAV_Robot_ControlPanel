@@ -419,14 +419,28 @@ void TeachWidget::startReplayConfirmed()
 
 void TeachWidget::onStopReplay()
 {
+    // User-pressed STOP button → halt motion immediately.
+    finishReplay(/*send_arm_stop=*/true, QStringLiteral("⏸ 已停止"));
+}
+
+void TeachWidget::finishReplay(bool send_arm_stop, const QString &log_msg)
+{
     if (replay_timer_) replay_timer_->stop();
     replay_idx_ = -1;
     btn_replay_->setEnabled(true);
     btn_stop_->setEnabled(false);
-    if (rpc_ && rpc_->isConnected()) {
+    // The CRITICAL distinction. Natural end-of-replay must NOT call
+    // arm.stop — the last waypoint is the operator's intended pose,
+    // and arm.stop would freeze the arm wherever it is mid-flight
+    // (often visibly short of the target, especially on joints that
+    // had to travel far inside the step_ms window). For natural end
+    // we just stop scheduling and let the heartbeat keep pushing
+    // target_joints (still set to the last waypoint) until the
+    // motors actually arrive.
+    if (send_arm_stop && rpc_ && rpc_->isConnected()) {
         rpc_->call(Protocol::Methods::ARM_STOP, QJsonObject{});
     }
-    appendLog(QStringLiteral("⏸ 已停止"));
+    if (!log_msg.isEmpty()) appendLog(log_msg);
 }
 
 void TeachWidget::executeStep(int idx)
@@ -471,7 +485,7 @@ void TeachWidget::executeStep(int idx)
 void TeachWidget::onReplayTick()
 {
     if (replay_idx_ < 0 || replay_idx_ >= waypoints_.size()) {
-        onStopReplay();
+        finishReplay(/*send_arm_stop=*/false, QString());
         return;
     }
     const Waypoint &w = waypoints_[replay_idx_];
@@ -482,8 +496,13 @@ void TeachWidget::onReplayTick()
         // advance
         ++replay_idx_;
         if (replay_idx_ >= waypoints_.size()) {
-            appendLog(QStringLiteral("✓ 回放完成 (%1 点)").arg(waypoints_.size()));
-            onStopReplay();
+            // Natural end of replay — let the arm finish travelling to
+            // the last commanded waypoint. heartbeat keeps pushing the
+            // target. No arm.stop here, otherwise the arm freezes mid-
+            // flight on joints that had to move a lot.
+            finishReplay(/*send_arm_stop=*/false,
+                         QStringLiteral("✓ 回放完成 (%1 点) — heartbeat 继续守住最后一点")
+                             .arg(waypoints_.size()));
             return;
         }
         replay_start_ms_ = now;
