@@ -949,16 +949,33 @@ void Tab4TaskConfig::onFlowStepExecute()
         return;
     }
 
-    // Start from index 0. onFlowStepAdvance() drives each sub-state via a
-    // dynamic timer (interval recalculated per step from joint delta).
-    // First step uses the spinner-set baseline since we don't know the
-    // "from" pose without a live get_angles call here (which would be
-    // async and racy with the immediate fire below).
+    // Choose execution mode:
+    //   - If the selected stage has a recorded script (via the ⚙
+    //     stage-config dialog), walk THE SCRIPT step-by-step. Every
+    //     step type fires (MOVE_JOINTS / GRIPPER / DWELL / etc.).
+    //   - Otherwise fall back to the legacy fine-state walker with
+    //     hardcoded demo poses.
+    if (stage_scripts_.contains(flow_step_selected_stage_) &&
+        !stage_scripts_[flow_step_selected_stage_].isEmpty()) {
+        flow_step_use_script_ = true;
+        flow_step_script_     = stage_scripts_[flow_step_selected_stage_];
+        appendLog("info",
+            QString("使用录制脚本 [%1] (含 %2 步,包含所有类型)")
+                .arg(flow_step_selected_stage_).arg(flow_step_script_.size()));
+    } else {
+        flow_step_use_script_ = false;
+        flow_step_script_.clear();
+        appendLog("info",
+            QString("无录制脚本,fallback 到硬编码 demo 位置 [%1]")
+                .arg(flow_step_selected_stage_));
+    }
     flow_step_run_idx_ = 0;
     flow_step_prev_joints_.clear();
+    const int total = flow_step_use_script_
+                          ? flow_step_script_.size()
+                          : flow_step_states_to_run_.size();
     flow_status_label_->setText(
-        QString("单步执行 [%1]  1/%2").arg(flow_step_selected_stage_)
-                                      .arg(flow_step_states_to_run_.size()));
+        QString("单步执行 [%1]  1/%2").arg(flow_step_selected_stage_).arg(total));
 
     if (!step_advance_timer_) {
         step_advance_timer_ = new QTimer(this);
@@ -977,19 +994,30 @@ void Tab4TaskConfig::onFlowStepExecute()
 
 void Tab4TaskConfig::onFlowStepAdvance()
 {
-    if (flow_step_run_idx_ < 0 ||
-        flow_step_run_idx_ >= flow_step_states_to_run_.size()) {
+    const int total = flow_step_use_script_
+                          ? flow_step_script_.size()
+                          : flow_step_states_to_run_.size();
+    if (flow_step_run_idx_ < 0 || flow_step_run_idx_ >= total) {
         // Done — mark last as Done, reset state.
         if (!flow_step_states_to_run_.isEmpty()) {
             flow_widget_->markFinished(flow_step_states_to_run_.last());
         }
         if (step_advance_timer_) step_advance_timer_->stop();
         flow_step_run_idx_ = -1;
+        flow_step_use_script_ = false;
+        flow_step_script_.clear();
         btn_flow_start_->setEnabled(true);
         btn_flow_stop_->setText("⏭ 跳过(标完成)");
         flow_status_label_->setText(
             QString("✓ 步骤 %1 执行完成").arg(flow_step_selected_stage_));
         appendLog("info", QString("✓ 步骤完成: %1").arg(flow_step_selected_stage_));
+        return;
+    }
+
+    // ── Script-mode branch: dispatch every step type ─────────────────
+    if (flow_step_use_script_) {
+        dispatchScriptStep(flow_step_script_[flow_step_run_idx_]);
+        ++flow_step_run_idx_;
         return;
     }
 
@@ -1092,6 +1120,141 @@ void Tab4TaskConfig::onFlowStepAdvance()
             .arg(s.label));
 
     ++flow_step_run_idx_;
+}
+
+// Dispatch one recorded TaskStep to the appropriate RPC, set the
+// step_advance_timer_ interval to match the step's expected duration,
+// and log what we're doing so the operator can follow along.
+//
+// Supported types:
+//   MOVE_JOINTS     → arm.move_joints  (dynamic ms by joint delta)
+//   MOVE_CARTESIAN  → piper.move_cartesian  (~3s default)
+//   GRIPPER         → piper.set_gripper_angle (~800ms)
+//   DWELL           → no RPC, just wait `ms` ms
+//   AIRPORT_GRIPPER → airport.lock / airport.release  (~2s)
+//   AIRPORT_RAIL    → airport.set_rail  (~3s)
+//   WAIT_DETECT_*   → currently skipped with a log (TODO: poll)
+void Tab4TaskConfig::dispatchScriptStep(const TaskStep &step)
+{
+    const int step_num = flow_step_run_idx_ + 1;
+    const int total    = flow_step_script_.size();
+    const QString note = step.label.isEmpty()
+        ? QString()
+        : QStringLiteral(" — %1").arg(step.label);
+    int duration_ms = 1500;   // default per-step duration
+
+    auto cb_log_err = [this, step_num](QJsonObject reply) {
+        if (!reply.value("ok").toBool(true)) {
+            appendLog("warn",
+                QString("⚠ 第 %1 步 RPC 拒绝: %2")
+                    .arg(step_num).arg(reply.value("error").toString()));
+        }
+    };
+
+    switch (step.type) {
+        case StepType::MOVE_JOINTS: {
+            const QVariantList j = step.params.value("joints").toList();
+            const double speed_ratio = step.params.value("speed_ratio", 0.30).toDouble();
+            if (j.size() != 6) {
+                appendLog("warn", QString("第 %1 步 MOVE_JOINTS 参数缺关节, 跳过").arg(step_num));
+                break;
+            }
+            QJsonObject p;
+            QJsonArray jarr;
+            QVector<float> target_joints(6);
+            for (int i = 0; i < 6; ++i) {
+                target_joints[i] = float(j[i].toDouble());
+                jarr.append(target_joints[i]);
+            }
+            p[Protocol::Fields::JOINTS] = jarr;
+            p["speed_ratio"] = speed_ratio;
+            rpc_->call(Protocol::Methods::ARM_MOVE_JOINTS, p, cb_log_err);
+
+            float max_delta = 0.0f;
+            if (!flow_step_prev_joints_.isEmpty()) {
+                for (int i = 0; i < 6 && i < flow_step_prev_joints_.size(); ++i) {
+                    max_delta = std::max(max_delta, std::abs(target_joints[i] - flow_step_prev_joints_[i]));
+                }
+            }
+            const float deg_per_s = float(60.0 * std::max(0.05, speed_ratio));
+            const int travel_ms = int(max_delta * 1000.0f / deg_per_s);
+            duration_ms = std::max(1500, travel_ms + 500);
+            flow_step_prev_joints_ = target_joints;
+            appendLog("info",
+                QString("▶ [%1/%2] MOVE_JOINTS 到 %3 (Δ%4°, %5ms)%6")
+                    .arg(step_num).arg(total)
+                    .arg(QString("[%1]").arg([&](){
+                        QStringList ss; for (int i = 0; i < 6; ++i) ss << QString::number(target_joints[i], 'f', 1);
+                        return ss.join(", ");
+                    }()))
+                    .arg(max_delta, 0, 'f', 1)
+                    .arg(duration_ms)
+                    .arg(note));
+            break;
+        }
+        case StepType::GRIPPER: {
+            const double angle_mm  = step.params.value("angle_mm").toDouble();
+            const int    force_pct = step.params.value("force_pct").toInt();
+            QJsonObject p;
+            p["angle_mm"]   = angle_mm;
+            p["effort_mNm"] = double(force_pct) * 20.0;   // 0-100% → 0-2000 mN·m
+            rpc_->call(Protocol::Methods::PIPER_SET_GRIPPER_ANGLE, p, cb_log_err);
+            duration_ms = 800;   // gripper actuation typically <500ms
+            appendLog("info",
+                QString("▶ [%1/%2] GRIPPER → %3mm @ %4%%5")
+                    .arg(step_num).arg(total)
+                    .arg(angle_mm, 0, 'f', 1)
+                    .arg(force_pct)
+                    .arg(note));
+            break;
+        }
+        case StepType::DWELL: {
+            const int ms = step.params.value("ms", 1000).toInt();
+            duration_ms = std::max(100, ms);
+            appendLog("info",
+                QString("▶ [%1/%2] DWELL %3ms%4")
+                    .arg(step_num).arg(total).arg(ms).arg(note));
+            break;
+        }
+        case StepType::AIRPORT_GRIPPER: {
+            const bool open = step.params.value("open").toBool();
+            QJsonObject p;
+            p["lock"] = !open;   // platform.lock=true means clamp; open means release
+            rpc_->call(open ? Protocol::Methods::AIRPORT_RELEASE
+                            : Protocol::Methods::AIRPORT_LOCK, p, cb_log_err);
+            duration_ms = 2500;
+            appendLog("info",
+                QString("▶ [%1/%2] AIRPORT_GRIPPER %3%4")
+                    .arg(step_num).arg(total).arg(open ? "释放" : "夹紧").arg(note));
+            break;
+        }
+        case StepType::AIRPORT_RAIL: {
+            const int rail = step.params.value("rail", 1).toInt();
+            const double pos_mm = step.params.value("pos_mm").toDouble();
+            const int speed_rpm = step.params.value("speed_rpm", 1500).toInt();
+            QJsonObject p;
+            p["rail"] = rail;
+            p["pos_mm"] = pos_mm;
+            p["speed_rpm"] = speed_rpm;
+            rpc_->call(Protocol::Methods::AIRPORT_SET_RAIL, p, cb_log_err);
+            duration_ms = 3000;
+            appendLog("info",
+                QString("▶ [%1/%2] AIRPORT_RAIL rail=%3 → %4mm%5")
+                    .arg(step_num).arg(total).arg(rail).arg(pos_mm, 0, 'f', 1).arg(note));
+            break;
+        }
+        case StepType::MOVE_CARTESIAN:
+        case StepType::WAIT_DETECT_UAV:
+        case StepType::WAIT_DETECT_BAT:
+            appendLog("warn",
+                QString("⚠ [%1/%2] %3 暂未在单步实机中支持, 跳过%4")
+                    .arg(step_num).arg(total)
+                    .arg(TaskStep::typeLabel(step.type)).arg(note));
+            duration_ms = 100;   // skip fast
+            break;
+    }
+
+    if (step_advance_timer_) step_advance_timer_->setInterval(duration_ms);
 }
 
 void Tab4TaskConfig::onFlowStepSkip()

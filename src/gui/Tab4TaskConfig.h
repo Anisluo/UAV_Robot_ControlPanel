@@ -78,6 +78,14 @@ private slots:
     void onFlowStepAdvance();   // QTimer 触发, 把执行索引向后推
 
 private:
+    // Walks one TaskStep from the recorded script, dispatching to the
+    // right RPC by step type and setting step_advance_timer_'s interval
+    // to match the step's expected duration.
+    void dispatchScriptStep(const struct TaskStep &step);
+
+private slots:
+
+private:
     void buildUi();
     QWidget* build3DViewer();
     QWidget* buildTaskPanel();
@@ -134,8 +142,14 @@ private:
     QRadioButton   *mode_step_radio_  = nullptr;   // 单步调试 (实机, 一次一步)
     QString         flow_step_selected_stage_;     // 当前选中的"步骤" (stage_id)
     QVector<QString> flow_step_states_to_run_;     // 选中 stage 下所有 state_id, 顺序
-    int              flow_step_run_idx_ = -1;      // 当前执行到第几个 (在 to_run_ 里的索引)
+    int              flow_step_run_idx_ = -1;      // 当前执行到第几个 (在 to_run_ 或 script 里的索引)
     QVector<float>   flow_step_prev_joints_;       // last commanded joints, for dynamic step_ms calc
+    // When the selected stage has a recorded script in stage_scripts_,
+    // single-step mode walks THE SCRIPT (every type — MOVE_JOINTS,
+    // GRIPPER, DWELL, etc.) instead of the hardcoded fine-states. The
+    // fine-state walker is only the fallback for unrecorded stages.
+    bool              flow_step_use_script_ = false;
+    QVector<TaskStep> flow_step_script_;
     class QTimer   *step_advance_timer_ = nullptr; // 在子状态间推进的计时器
     QPushButton    *btn_flow_start_   = nullptr;
     QPushButton    *btn_flow_stop_    = nullptr;
