@@ -15,6 +15,7 @@
 #include <QDoubleSpinBox>
 #include <QSpinBox>
 #include <QCheckBox>
+#include <QLineEdit>
 #include <QDialogButtonBox>
 #include <QGroupBox>
 #include <QMessageBox>
@@ -113,6 +114,22 @@ void StageConfigDialog::buildUi()
     editor_title_ = new QLabel(QStringLiteral("<i>选中左侧某行查看参数</i>"), this);
     editor_title_->setStyleSheet("font-size:13px; padding:2px;");
     right->addWidget(editor_title_);
+
+    // 备注 — free-form operator memo, always visible regardless of step
+    // type. Stored in TaskStep::label (which the struct comment already
+    // labels as an operator note). Edits flow through onParamChanged so
+    // the list row updates live as the operator types.
+    auto *note_row = new QHBoxLayout;
+    auto *note_lbl = new QLabel(QStringLiteral("📝 备注:"), this);
+    note_lbl->setStyleSheet("color:#aab;");
+    step_note_edit_ = new QLineEdit(this);
+    step_note_edit_->setPlaceholderText(
+        QStringLiteral("这一步是干啥用的 (例如: 电池上方安全位 / 抓取准备 / 等待对中)"));
+    note_row->addWidget(note_lbl);
+    note_row->addWidget(step_note_edit_, /*stretch=*/1);
+    right->addLayout(note_row);
+    connect(step_note_edit_, &QLineEdit::textEdited,
+            this, &StageConfigDialog::onParamChanged);
 
     editor_stack_ = new QStackedWidget(this);
     buildEditPanels();
@@ -306,17 +323,26 @@ void StageConfigDialog::buildEditPanels()
 // ════════════════════════════════════════════════════════════════════════
 // List management
 // ════════════════════════════════════════════════════════════════════════
+// Helper: format one row label-string. Includes 📝 备注 when present so
+// the operator can identify what each step is for at a glance.
+static QString stepRowText(int idx_0based, const TaskStep &s)
+{
+    QString text = QStringLiteral("%1. %2  —  %3")
+        .arg(idx_0based + 1, 2, 10, QChar('0'))
+        .arg(TaskStep::typeLabel(s.type))
+        .arg(s.summary());
+    if (!s.label.isEmpty()) {
+        text += QStringLiteral("   📝 %1").arg(s.label);
+    }
+    return text;
+}
+
 void StageConfigDialog::refreshList()
 {
     const int prev = list_->currentRow();
     list_->clear();
     for (int i = 0; i < steps_.size(); ++i) {
-        const auto &s = steps_[i];
-        auto *item = new QListWidgetItem(
-            QStringLiteral("%1. %2  —  %3")
-                .arg(i + 1, 2, 10, QChar('0'))
-                .arg(TaskStep::typeLabel(s.type))
-                .arg(s.summary()));
+        auto *item = new QListWidgetItem(stepRowText(i, steps_[i]));
         list_->addItem(item);
     }
     if (prev >= 0 && prev < steps_.size()) {
@@ -413,6 +439,11 @@ void StageConfigDialog::showRow(int row)
     if (!valid) {
         editor_title_->setText(QStringLiteral("<i>选中左侧某行查看参数</i>"));
         editor_stack_->setCurrentIndex(0);
+        if (step_note_edit_) {
+            const QSignalBlocker block(step_note_edit_);
+            step_note_edit_->clear();
+            step_note_edit_->setEnabled(false);
+        }
         return;
     }
 
@@ -420,6 +451,11 @@ void StageConfigDialog::showRow(int row)
     editor_title_->setText(
         QStringLiteral("<b>步骤 %1</b> · %2").arg(row + 1).arg(TaskStep::typeLabel(s.type)));
     editor_stack_->setCurrentIndex(int(s.type));
+    if (step_note_edit_) {
+        const QSignalBlocker block(step_note_edit_);
+        step_note_edit_->setEnabled(true);
+        step_note_edit_->setText(s.label);
+    }
 
     // Block signals while populating to avoid round-tripping into onParamChanged
     const QList<QWidget*> editors = {
@@ -474,6 +510,10 @@ void StageConfigDialog::showRow(int row)
 
 void StageConfigDialog::readEditorsTo(TaskStep &s)
 {
+    // Note is shared across all step types.
+    if (step_note_edit_) {
+        s.label = step_note_edit_->text();
+    }
     switch (s.type) {
         case StepType::MOVE_JOINTS: {
             QVariantList j; for (int i = 0; i < 6; ++i) j << mj_j_[i]->value();
@@ -524,11 +564,7 @@ void StageConfigDialog::onParamChanged()
     // wiping the focus from the active editor).
     auto *item = list_->item(cur_row_);
     if (item) {
-        const TaskStep &s = steps_[cur_row_];
-        item->setText(QStringLiteral("%1. %2  —  %3")
-                          .arg(cur_row_ + 1, 2, 10, QChar('0'))
-                          .arg(TaskStep::typeLabel(s.type))
-                          .arg(s.summary()));
+        item->setText(stepRowText(cur_row_, steps_[cur_row_]));
     }
 }
 

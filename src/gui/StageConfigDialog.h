@@ -78,6 +78,7 @@ private:
     // right side: stacked editors per type, indexed by int(StepType)
     QStackedWidget *editor_stack_ = nullptr;
     QLabel         *editor_title_ = nullptr;
+    class QLineEdit *step_note_edit_ = nullptr;   // 备注 (stored in TaskStep.label)
 
     // MOVE_JOINTS
     QDoubleSpinBox *mj_j_[6]   = {nullptr};
