@@ -71,6 +71,7 @@ private:
 
     struct Waypoint {
         QString        label;
+        QString        note;                    // free-form operator memo
         QVector<float> joints;                  // J1..J6 in degrees
         GripperState   gripper_state = GripperUnchanged;
         int            gripper_angle    = 60;   // ° (5=closed, 60=open)

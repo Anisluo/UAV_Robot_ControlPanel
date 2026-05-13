@@ -194,19 +194,28 @@ void TeachWidget::rebuildList()
             if (k) joints += " ";
             joints += QString::number(w.joints[k], 'f', 1);
         }
-        const QString line = QStringLiteral("#%1 %2  [%3]  %4 ms")
+        // Note (备注) goes right after the label so the operator can
+        // see at a glance what each point is for. If empty, the cell
+        // is just blank padding.
+        const QString note_cell = w.note.isEmpty()
+            ? QString(20, QChar(' '))
+            : QString("📝 %1").arg(w.note).leftJustified(20, ' ', true);
+        const QString line = QStringLiteral("#%1 %2 %3 [%4] %5 ms")
             .arg(i + 1, 2, 10, QChar('0'))
-            .arg(w.label.leftJustified(14, ' '))
+            .arg(w.label.leftJustified(8, ' '))
+            .arg(note_cell)
             .arg(joints)
             .arg(w.dwell_ms);
         auto *item = new QListWidgetItem(line);
-        item->setToolTip(QString("%1\n%2\ndwell %3 ms")
-                             .arg(w.label, gripperStateText(w.gripper_state))
+        item->setToolTip(QString("%1\n备注: %2\n%3\ndwell %4 ms")
+                             .arg(w.label,
+                                  w.note.isEmpty() ? QStringLiteral("(无)") : w.note,
+                                  gripperStateText(w.gripper_state))
                              .arg(w.dwell_ms));
         item->setForeground(QColor(gripperStateColor(w.gripper_state)));
         wp_list_->addItem(item);
     }
-    count_label_->setText(QStringLiteral("%1 个点  (双击行修改夹爪/停留)")
+    count_label_->setText(QStringLiteral("%1 个点  (双击行修改备注/夹爪/停留)")
                               .arg(waypoints_.size()));
 }
 
@@ -284,6 +293,7 @@ void TeachWidget::onSaveToFile()
     for (const Waypoint &w : waypoints_) {
         QJsonObject jo;
         jo["label"]             = w.label;
+        jo["note"]              = w.note;
         QJsonArray jj;
         for (float v : w.joints) jj.append(v);
         jo["joints"]            = jj;
@@ -335,6 +345,7 @@ void TeachWidget::onLoadFromFile()
         const QJsonObject jo = v.toObject();
         Waypoint w;
         w.label = jo.value("label").toString();
+        w.note  = jo.value("note").toString();   // empty for older files
         for (const auto &j : jo.value("joints").toArray()) {
             w.joints.append(float(j.toDouble()));
         }
@@ -448,19 +459,36 @@ void TeachWidget::onRowDoubleClicked(int row)
     if (row < 0 || row >= waypoints_.size()) return;
     Waypoint &w = waypoints_[row];
 
-    // Reuse QInputDialog with a combo for gripper state.
+    // Step 1: edit free-form note. The operator uses this to remember
+    // what the waypoint is for ("电池上方 5cm 安全位", "末端朝下抓取
+    // 准备", etc.) so the row in the list is meaningful days later.
+    // Cancelling here aborts the whole edit so the operator doesn't get
+    // stuck answering the gripper/dwell dialogs just to view the note.
+    bool ok = false;
+    const QString note = QInputDialog::getText(this,
+        QStringLiteral("备注"),
+        QStringLiteral("第 %1 点 — 备注 (用途/位置/注意事项):").arg(row + 1),
+        QLineEdit::Normal, w.note, &ok);
+    if (!ok) return;
+    w.note = note;
+
+    // Step 2: gripper state combo.
     QStringList items = {
         QStringLiteral("不变"),
         QStringLiteral("张开 (60°, 30% 力)"),
         QStringLiteral("闭合-轻 (5°, 30% 力)"),
         QStringLiteral("闭合-紧 (5°, 90% 力)"),
     };
-    bool ok = false;
     const QString chosen = QInputDialog::getItem(this,
         QStringLiteral("修改夹爪状态"),
         QStringLiteral("第 %1 点 — 夹爪动作:").arg(row + 1),
         items, int(w.gripper_state), false, &ok);
-    if (!ok) return;
+    if (!ok) {
+        // Operator cancelled gripper edit but still wants the note saved.
+        rebuildList();
+        wp_list_->setCurrentRow(row);
+        return;
+    }
     const int idx = items.indexOf(chosen);
     w.gripper_state = GripperState(idx);
     switch (w.gripper_state) {
@@ -470,7 +498,7 @@ void TeachWidget::onRowDoubleClicked(int row)
         default: break;
     }
 
-    // Then ask for dwell.
+    // Step 3: dwell.
     const int dwell = QInputDialog::getInt(this,
         QStringLiteral("修改停留"),
         QStringLiteral("第 %1 点 — 到位后停留 (ms):").arg(row + 1),
@@ -479,6 +507,9 @@ void TeachWidget::onRowDoubleClicked(int row)
 
     rebuildList();
     wp_list_->setCurrentRow(row);
-    appendLog(QStringLiteral("第 %1 点改为: %2, dwell %3 ms")
-                  .arg(row + 1).arg(gripperStateText(w.gripper_state)).arg(w.dwell_ms));
+    appendLog(QStringLiteral("第 %1 点: %2, %3, dwell %4 ms")
+                  .arg(row + 1)
+                  .arg(w.note.isEmpty() ? QStringLiteral("(无备注)") : w.note)
+                  .arg(gripperStateText(w.gripper_state))
+                  .arg(w.dwell_ms));
 }
