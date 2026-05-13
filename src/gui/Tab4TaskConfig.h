@@ -83,6 +83,8 @@ private:
     // right RPC by step type and setting step_advance_timer_'s interval
     // to match the step's expected duration.
     void dispatchScriptStep(const struct TaskStep &step);
+    struct SimSegment;
+    QVector<SimSegment> buildSimPlaylist() const;
     QWidget* build3DViewer();
     QWidget* buildTaskPanel();
     QWidget* buildSimPanel();
@@ -152,14 +154,30 @@ private:
     QPushButton    *btn_flow_reset_   = nullptr;
     QLabel         *flow_status_label_= nullptr;
 
-    // Flow simulator (sim mode) — lerps J1..J6 between station demo poses
-    // and advances through the 24-state pipeline.
-    QTimer        *flow_sim_timer_       = nullptr;   // 30 Hz interp tick
-    int            flow_sim_state_idx_   = -1;        // -1 = not running
-    QVector<float> flow_sim_start_joints_;
-    QVector<float> flow_sim_target_joints_;
-    qint64         flow_sim_step_start_ms_ = 0;
-    int            flow_sim_step_dur_ms_   = 1500;    // per-state animation
+    // Flow simulator (sim mode) — walks a precomputed playlist.
+    //   - If a stage has a configured TaskStep script (stage_scripts_),
+    //     each script step becomes one segment:
+    //         MOVE_JOINTS → animate joints to target with speed_ratio
+    //         GRIPPER/DWELL/AIRPORT_* → hold position for the step's
+    //                                    natural duration
+    //     This is what makes sim run with the operator's recorded points
+    //     instead of the canned demo poses.
+    //   - If a stage has NO script, fall back to the legacy fine-state
+    //     walk: one segment per fine-state, target = demo_joints_deg.
+    struct SimSegment {
+        QString        stage_id;        // for marking stage finished + status
+        QString        state_id;        // for setCurrentState; empty in script mode
+        QString        label;           // status-bar text
+        QVector<float> target_joints;   // empty = hold previous
+        int            duration_ms = 1500;
+        bool           is_script_step = false;
+    };
+    QTimer            *flow_sim_timer_      = nullptr;  // 30 Hz interp tick
+    QVector<SimSegment> sim_playlist_;
+    int                sim_seg_idx_         = -1;       // -1 = not running
+    QVector<float>     flow_sim_start_joints_;
+    qint64             flow_sim_step_start_ms_ = 0;
+    int                flow_sim_step_dur_ms_   = 1500;
 
     // Real-mode polling of proc_battery_swap.
     QTimer        *swap_poll_timer_      = nullptr;

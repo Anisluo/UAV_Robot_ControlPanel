@@ -661,6 +661,137 @@ void Tab4TaskConfig::onFlowModeChanged()
     }
 }
 
+// Build the sim playlist: walk each stage in pipeline order; for each
+// stage, expand into either (a) the configured TaskStep script's steps
+// if one was recorded, or (b) the stage's fine-grained demo states as
+// fallback. Each entry carries its own joint target + duration so the
+// simulator just walks the list without per-tick conditional logic.
+QVector<Tab4TaskConfig::SimSegment> Tab4TaskConfig::buildSimPlaylist() const
+{
+    QVector<SimSegment> out;
+    const auto &stages = TaskFlowWidget::stages();
+    const auto &states = TaskFlowWidget::states();
+
+    // Prior pose (initial joints = 0). Used to size MOVE_JOINTS segments
+    // by joint travel — large moves get longer animations.
+    QVector<float> prev_joints(6, 0.0f);
+
+    auto segDurFromTravel = [](const QVector<float> &from,
+                               const QVector<float> &to,
+                               double speed_ratio) -> int {
+        if (from.size() != 6 || to.size() != 6) return 1500;
+        float max_delta = 0.0f;
+        for (int i = 0; i < 6; ++i) {
+            max_delta = std::max(max_delta, std::abs(to[i] - from[i]));
+        }
+        // 60 deg/s at speed_ratio=1; scale down at lower ratios.
+        const double sr = (speed_ratio > 0.05) ? speed_ratio : 0.30;
+        const double deg_per_s = 60.0 * sr;
+        const int travel_ms = int(max_delta * 1000.0 / std::max(1.0, deg_per_s));
+        return std::max(600, travel_ms + 300);
+    };
+
+    for (const TaskStage &stage : stages) {
+        const auto sit = stage_scripts_.constFind(stage.id);
+        const bool has_script = (sit != stage_scripts_.constEnd() && !sit.value().isEmpty());
+
+        if (has_script) {
+            const QVector<TaskStep> &script = sit.value();
+            // Find the first fine-state of this stage so flow_widget_
+            // shows the right card as "active" while the script runs.
+            QString first_state_id;
+            const QVector<QString> stage_states = TaskFlowWidget::statesInStage(stage.id);
+            if (!stage_states.isEmpty()) first_state_id = stage_states.first();
+
+            bool first_seg_of_stage = true;
+            for (const TaskStep &step : script) {
+                SimSegment seg;
+                seg.stage_id       = stage.id;
+                seg.is_script_step = true;
+                if (first_seg_of_stage) {
+                    seg.state_id = first_state_id;
+                    first_seg_of_stage = false;
+                }
+
+                switch (step.type) {
+                    case StepType::MOVE_JOINTS: {
+                        const QVariantList j = step.params.value("joints").toList();
+                        if (j.size() == 6) {
+                            seg.target_joints.resize(6);
+                            for (int i = 0; i < 6; ++i)
+                                seg.target_joints[i] = float(j[i].toDouble());
+                            const double sr = step.params.value("speed_ratio", 0.30).toDouble();
+                            seg.duration_ms = segDurFromTravel(prev_joints, seg.target_joints, sr);
+                            prev_joints = seg.target_joints;
+                            seg.label = QStringLiteral("[%1] %2  %3")
+                                            .arg(stage.title).arg("MOVE_JOINTS")
+                                            .arg(step.label.isEmpty() ? step.summary() : step.label);
+                        } else {
+                            seg.duration_ms = 600;
+                            seg.label = QStringLiteral("[%1] MOVE_JOINTS (无效)").arg(stage.title);
+                        }
+                        break;
+                    }
+                    case StepType::GRIPPER:
+                        seg.duration_ms = 800;
+                        seg.label = QStringLiteral("[%1] GRIPPER %2").arg(stage.title).arg(step.summary());
+                        break;
+                    case StepType::AIRPORT_RAIL:
+                    case StepType::AIRPORT_GRIPPER:
+                        // Stall-driven on real hardware; in sim just dwell briefly.
+                        seg.duration_ms = 1500;
+                        seg.label = QStringLiteral("[%1] %2 %3")
+                                        .arg(stage.title)
+                                        .arg(TaskStep::typeLabel(step.type))
+                                        .arg(step.summary());
+                        break;
+                    case StepType::WAIT_DETECT_UAV:
+                    case StepType::WAIT_DETECT_BAT:
+                        // Sim can't actually poll detection; show brief.
+                        seg.duration_ms = 800;
+                        seg.label = QStringLiteral("[%1] %2 (sim 跳过等待)")
+                                        .arg(stage.title)
+                                        .arg(TaskStep::typeLabel(step.type));
+                        break;
+                    case StepType::DWELL:
+                        seg.duration_ms = std::max(200, step.params.value("ms", 1000).toInt());
+                        seg.label = QStringLiteral("[%1] DWELL %2ms").arg(stage.title).arg(seg.duration_ms);
+                        break;
+                    case StepType::MOVE_CARTESIAN:
+                        // No FK to play this faithfully in viewer; brief hold.
+                        seg.duration_ms = 1500;
+                        seg.label = QStringLiteral("[%1] CARTESIAN (sim 占位)").arg(stage.title);
+                        break;
+                }
+                out.append(std::move(seg));
+            }
+        } else {
+            // No script for this stage — fall back to the legacy fine-state
+            // demo walk: one segment per fine-state.
+            for (const QString &sid : TaskFlowWidget::statesInStage(stage.id)) {
+                int idx = -1;
+                for (int i = 0; i < states.size(); ++i) {
+                    if (states[i].id == sid) { idx = i; break; }
+                }
+                if (idx < 0) continue;
+                SimSegment seg;
+                seg.stage_id      = stage.id;
+                seg.state_id      = sid;
+                seg.is_script_step = false;
+                if (states[idx].demo_joints_deg.size() == 6) {
+                    seg.target_joints = states[idx].demo_joints_deg;
+                    prev_joints = seg.target_joints;
+                }
+                seg.duration_ms = 1500;
+                seg.label = QStringLiteral("[%1] %2 (demo)")
+                                .arg(stage.title).arg(states[idx].label);
+                out.append(std::move(seg));
+            }
+        }
+    }
+    return out;
+}
+
 void Tab4TaskConfig::onFlowStart()
 {
     // 单步模式: 复用"开始"按钮做"执行选中步" - 不走全流程逻辑
@@ -679,24 +810,41 @@ void Tab4TaskConfig::onFlowStart()
 
     if (flow_simulating_) {
         appendLog("info", "模拟模式启动 — 流程图驱动 3D 视图, 不接触真实机械臂");
-        // Halt the 5 Hz arm.get_angles poll while the simulator drives
-        // the viewer at 30 Hz — otherwise each RPC reply overwrites the
-        // interpolated frame and the arm visibly snaps back to the live
-        // pose every 200 ms, which reads as choppy motion.
         if (sim_worker_) {
             QMetaObject::invokeMethod(sim_worker_, "stopAnglePolling",
                                       Qt::QueuedConnection);
         }
-        // Seed starting joints from whatever's currently in the viewer.
-        flow_sim_start_joints_  = { 0, 0, 0, 0, 0, 0 };
-        flow_sim_target_joints_ = TaskFlowWidget::states()[0].demo_joints_deg;
-        flow_sim_state_idx_     = 0;
-        flow_sim_step_start_ms_ = QDateTime::currentMSecsSinceEpoch();
-        flow_widget_->setCurrentState(TaskFlowWidget::states()[0].id);
-        flow_status_label_->setText(QString("模拟运行 · %1/%2 · %3")
-                                       .arg(1)
-                                       .arg(TaskFlowWidget::states().size())
-                                       .arg(TaskFlowWidget::states()[0].label));
+
+        // Build the playlist from configured scripts (preferred) + demo
+        // fine-state poses (fallback). This is what the user means by "sim
+        // should use the points I configured" — each MOVE_JOINTS step in
+        // a stage's script becomes one animation segment.
+        sim_playlist_ = buildSimPlaylist();
+        if (sim_playlist_.isEmpty()) {
+            appendLog("warn", "模拟模式: 无可播放段 (流程图为空且无脚本)");
+            flow_running_ = false;
+            flow_simulating_ = false;
+            btn_flow_start_->setEnabled(true);
+            btn_flow_stop_->setEnabled(false);
+            return;
+        }
+        int scripted_segs = 0;
+        for (const auto &seg : sim_playlist_) if (seg.is_script_step) ++scripted_segs;
+        appendLog("info",
+            QString("模拟段共 %1 (其中脚本步 %2, 默认 demo 段 %3)")
+                .arg(sim_playlist_.size())
+                .arg(scripted_segs)
+                .arg(sim_playlist_.size() - scripted_segs));
+
+        flow_sim_start_joints_   = { 0, 0, 0, 0, 0, 0 };
+        sim_seg_idx_             = 0;
+        const SimSegment &first  = sim_playlist_[0];
+        flow_sim_step_dur_ms_    = first.duration_ms;
+        flow_sim_step_start_ms_  = QDateTime::currentMSecsSinceEpoch();
+        if (!first.state_id.isEmpty()) flow_widget_->setCurrentState(first.state_id);
+        flow_status_label_->setText(QString("模拟运行 · 1/%1 · %2")
+                                       .arg(sim_playlist_.size())
+                                       .arg(first.label));
         flow_sim_timer_->start();
     } else {
         appendLog("info", "实机模式启动 — 调用 swap.start (proc_battery_swap 须运行中)");
@@ -749,104 +897,104 @@ void Tab4TaskConfig::onFlowReset()
 {
     if (flow_running_) onFlowStop();
     flow_widget_->resetAll();
-    flow_sim_state_idx_ = -1;
+    sim_seg_idx_ = -1;
+    sim_playlist_.clear();
     flow_status_label_->setText(QString("就绪 · 模式: %1")
                                    .arg(mode_sim_radio_->isChecked() ? "模拟" : "实机"));
 }
 
 void Tab4TaskConfig::onFlowSimTick()
 {
-    if (!flow_simulating_ || flow_sim_state_idx_ < 0) return;
+    if (!flow_simulating_ || sim_seg_idx_ < 0
+        || sim_seg_idx_ >= sim_playlist_.size()) return;
 
-    const auto &states = TaskFlowWidget::states();
+    const SimSegment &cur = sim_playlist_[sim_seg_idx_];
     const qint64 now_ms = QDateTime::currentMSecsSinceEpoch();
     const qint64 elapsed = now_ms - flow_sim_step_start_ms_;
     const double t = qBound(0.0, double(elapsed) / double(flow_sim_step_dur_ms_), 1.0);
     // Smooth ease-in-out so the 3D motion doesn't look mechanical.
     const double s = (t < 0.5) ? 2.0 * t * t : 1.0 - std::pow(-2.0 * t + 2.0, 2.0) / 2.0;
 
-    // Interpolate joint angles and push into the viewer.
-    if (viewer_3d_ && flow_sim_start_joints_.size() == 6 && flow_sim_target_joints_.size() == 6) {
-        QVector<float> live(6);
-        for (int i = 0; i < 6; ++i) {
-            live[i] = float(flow_sim_start_joints_[i] +
-                            (flow_sim_target_joints_[i] - flow_sim_start_joints_[i]) * s);
+    // Interpolate joint angles into the viewer. Segments with empty
+    // target_joints (GRIPPER/DWELL/AIRPORT_*) just hold the previous
+    // pose — viewer stays at flow_sim_start_joints_.
+    if (viewer_3d_ && flow_sim_start_joints_.size() == 6) {
+        QVector<float> live = flow_sim_start_joints_;
+        if (cur.target_joints.size() == 6) {
+            for (int i = 0; i < 6; ++i) {
+                live[i] = float(flow_sim_start_joints_[i] +
+                                (cur.target_joints[i] - flow_sim_start_joints_[i]) * s);
+            }
         }
         viewer_3d_->setJointAngles(live);
     }
 
-    if (t >= 1.0) {
-        // Mark the just-completed state as Done and advance to the next.
-        flow_widget_->markFinished(states[flow_sim_state_idx_].id);
+    if (t < 1.0) return;
 
-        if (flow_sim_state_idx_ + 1 >= states.size()) {
-            // Task complete.
-            appendLog("info", "模拟运行完成 — 全 24 状态走完");
-            flow_sim_timer_->stop();
-            // Mirror onFlowStop(): hand the viewer back to the live poll.
-            if (sim_worker_) {
-                QMetaObject::invokeMethod(sim_worker_, "startAnglePolling",
-                                          Qt::QueuedConnection, Q_ARG(int, 200));
-            }
-            flow_running_ = false;
-            btn_flow_start_->setEnabled(true);
-            btn_flow_stop_->setEnabled(false);
-            flow_status_label_->setText("模拟完成");
-            flow_sim_state_idx_ = -1;
-            return;
-        }
-
-        // Start the next state.
-        flow_sim_state_idx_++;
-        flow_sim_start_joints_   = flow_sim_target_joints_;
-        flow_sim_target_joints_  = states[flow_sim_state_idx_].demo_joints_deg;
-
-        // ── Per-stage configured-script overlay ─────────────────────
-        // If the operator recorded a TaskStep script for the stage this
-        // new state belongs to, replace the demo joint target with the
-        // i-th MOVE_JOINTS step from the script (where i = position of
-        // this fine-grained state within the stage). That way "点仿真"
-        // actually walks the arm through the recorded waypoints
-        // instead of the canned demo poses.
-        const QString new_state_id = states[flow_sim_state_idx_].id;
-        const QString stage_id     = TaskFlowWidget::stageOfState(new_state_id);
-        if (!stage_id.isEmpty() && stage_scripts_.contains(stage_id)) {
-            const QVector<QString> stage_states = TaskFlowWidget::statesInStage(stage_id);
-            const int pos_in_stage = stage_states.indexOf(new_state_id);
-            // Collect just the MOVE_JOINTS steps from the script, in order.
-            const auto &script = stage_scripts_[stage_id];
-            QVector<int> mj_step_indices;
-            for (int si = 0; si < script.size(); ++si) {
-                if (script[si].type == StepType::MOVE_JOINTS) mj_step_indices.append(si);
-            }
-            if (pos_in_stage >= 0 && pos_in_stage < mj_step_indices.size()) {
-                const TaskStep &s = script[mj_step_indices[pos_in_stage]];
-                const QVariantList j = s.params.value("joints").toList();
-                if (j.size() == 6) {
-                    QVector<float> override_target(6);
-                    for (int i = 0; i < 6; ++i) override_target[i] = float(j[i].toDouble());
-                    flow_sim_target_joints_ = override_target;
-                    // Also scale step duration by inverse of speed_ratio
-                    // (slower script speed → longer animation segment).
-                    const double sr = s.params.value("speed_ratio", 0.3).toDouble();
-                    if (sr > 0.0) flow_sim_step_dur_ms_ = int(1500.0 / sr * 0.3);
-                }
-            }
-            // Log script presence the first time we see this stage in a run
-            // (i.e., when entering its first state).
-            if (pos_in_stage == 0) {
-                appendLog("info", QString("[sim] 进入 stage %1 (含 %2 步配置)")
-                                       .arg(stage_id).arg(script.size()));
-            }
-        }
-
-        flow_sim_step_start_ms_  = now_ms;
-        flow_widget_->setCurrentState(new_state_id);
-        flow_status_label_->setText(QString("模拟运行 · %1/%2 · %3")
-                                       .arg(flow_sim_state_idx_ + 1)
-                                       .arg(states.size())
-                                       .arg(states[flow_sim_state_idx_].label));
+    // Segment complete — settle pose at the target, mark stage state
+    // progress, then advance.
+    if (cur.target_joints.size() == 6) {
+        flow_sim_start_joints_ = cur.target_joints;
     }
+    // For fine-state-mode segments we mark per-state; for script-mode
+    // segments we'll mark the whole stage finished when its last segment
+    // ends (handled below at stage-boundary).
+    if (!cur.is_script_step && !cur.state_id.isEmpty()) {
+        flow_widget_->markFinished(cur.state_id);
+    }
+
+    // Detect stage boundary: if the next segment is in a different
+    // stage (or there is no next), mark all of the current stage's
+    // fine-states as Done. This is the only place script-mode segments
+    // touch the flow-chart status.
+    const QString cur_stage = cur.stage_id;
+    const bool last_seg = (sim_seg_idx_ + 1 >= sim_playlist_.size());
+    const bool stage_boundary = last_seg
+        || sim_playlist_[sim_seg_idx_ + 1].stage_id != cur_stage;
+    if (stage_boundary && !cur_stage.isEmpty()) {
+        for (const QString &sid : TaskFlowWidget::statesInStage(cur_stage)) {
+            flow_widget_->markFinished(sid);
+        }
+    }
+
+    sim_seg_idx_++;
+    if (sim_seg_idx_ >= sim_playlist_.size()) {
+        appendLog("info",
+            QString("模拟运行完成 — 共 %1 段").arg(sim_playlist_.size()));
+        flow_sim_timer_->stop();
+        if (sim_worker_) {
+            QMetaObject::invokeMethod(sim_worker_, "startAnglePolling",
+                                      Qt::QueuedConnection, Q_ARG(int, 200));
+        }
+        flow_running_ = false;
+        btn_flow_start_->setEnabled(true);
+        btn_flow_stop_->setEnabled(false);
+        flow_status_label_->setText("模拟完成");
+        sim_seg_idx_ = -1;
+        return;
+    }
+
+    const SimSegment &next = sim_playlist_[sim_seg_idx_];
+    flow_sim_step_dur_ms_   = next.duration_ms;
+    flow_sim_step_start_ms_ = now_ms;
+    if (!next.state_id.isEmpty()) {
+        flow_widget_->setCurrentState(next.state_id);
+    }
+    // Stage entry log when crossing into a new stage.
+    if (next.stage_id != cur.stage_id) {
+        const int script_size =
+            stage_scripts_.contains(next.stage_id)
+                ? stage_scripts_[next.stage_id].size() : 0;
+        if (script_size > 0) {
+            appendLog("info",
+                QString("[sim] 进入 stage %1 (脚本 %2 步)")
+                    .arg(next.stage_id).arg(script_size));
+        }
+    }
+    flow_status_label_->setText(QString("模拟运行 · %1/%2 · %3")
+                                   .arg(sim_seg_idx_ + 1)
+                                   .arg(sim_playlist_.size())
+                                   .arg(next.label));
 }
 
 void Tab4TaskConfig::onSwapStatusPoll()
