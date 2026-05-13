@@ -78,15 +78,11 @@ private slots:
     void onFlowStepAdvance();   // QTimer 触发, 把执行索引向后推
 
 private:
+    void buildUi();
     // Walks one TaskStep from the recorded script, dispatching to the
     // right RPC by step type and setting step_advance_timer_'s interval
     // to match the step's expected duration.
     void dispatchScriptStep(const struct TaskStep &step);
-
-private slots:
-
-private:
-    void buildUi();
     QWidget* build3DViewer();
     QWidget* buildTaskPanel();
     QWidget* buildSimPanel();
