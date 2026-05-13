@@ -950,8 +950,12 @@ void Tab4TaskConfig::onFlowStepExecute()
     }
 
     // Start from index 0. onFlowStepAdvance() drives each sub-state via a
-    // 1500 ms timer; we kick the first one immediately for snappier feel.
+    // dynamic timer (interval recalculated per step from joint delta).
+    // First step uses the spinner-set baseline since we don't know the
+    // "from" pose without a live get_angles call here (which would be
+    // async and racy with the immediate fire below).
     flow_step_run_idx_ = 0;
+    flow_step_prev_joints_.clear();
     flow_status_label_->setText(
         QString("单步执行 [%1]  1/%2").arg(flow_step_selected_stage_)
                                       .arg(flow_step_states_to_run_.size()));
@@ -1007,6 +1011,30 @@ void Tab4TaskConfig::onFlowStepAdvance()
     for (float v : s.demo_joints_deg) jarr.append(v);
     params[Protocol::Fields::JOINTS] = jarr;
     rpc_->call(Protocol::Methods::ARM_MOVE_JOINTS, params);
+
+    // Dynamically extend timer interval if this step's max joint
+    // delta from the previous step is large. Hardcoded 1500 ms was
+    // too short for >30° moves at 30% speed — the next tick fired
+    // before the arm reached, target got overwritten, arm landed
+    // visibly short. Estimate: 0.6 × speed_pct °/s + 500ms buffer.
+    if (step_advance_timer_) {
+        float max_delta = 0.0f;
+        if (!flow_step_prev_joints_.isEmpty()) {
+            for (int i = 0; i < 6 && i < flow_step_prev_joints_.size() && i < s.demo_joints_deg.size(); ++i) {
+                max_delta = std::max(max_delta, std::abs(s.demo_joints_deg[i] - flow_step_prev_joints_[i]));
+            }
+        }
+        const int speed_pct = 30;   // TODO: pull from piper.get_status if available
+        const float deg_per_s = 0.6f * float(speed_pct);
+        const int travel_ms = int(max_delta * 1000.0f / deg_per_s);
+        const int dyn_step_ms = std::max(1500, travel_ms + 500);
+        step_advance_timer_->setInterval(dyn_step_ms);
+        if (max_delta > 0.0f) {
+            appendLog("info", QString("  estimated travel %1° → step %2 ms")
+                                  .arg(max_delta, 0, 'f', 1).arg(dyn_step_ms));
+        }
+    }
+    flow_step_prev_joints_ = s.demo_joints_deg;   // remember for next step's delta
 
     flow_widget_->setCurrentState(s.id);
 

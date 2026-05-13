@@ -67,6 +67,7 @@ private:
     void appendLog(const QString &msg);
     void executeStep(int idx);
     void startReplayConfirmed();    // continuation after pre-flight ctrl_mode check
+    void kickReplay();              // continuation after fetching current pose + speed
     void finishReplay(bool send_arm_stop, const QString &log_msg);
 
     RpcClient *rpc_;
@@ -98,7 +99,10 @@ private:
     QTimer *replay_timer_  = nullptr;
     int     replay_idx_    = -1;
     qint64  replay_start_ms_ = 0;
-    int     replay_step_dur_ms_ = 1500;
+    int     replay_step_dur_ms_ = 1500;       // operator-set minimum step time
+    int     replay_effective_step_ms_ = 1500; // dynamically estimated from joint delta
+    int     replay_speed_pct_ = 30;           // fetched from piper.get_status at replay start
+    QVector<float> replay_prev_joints_;       // pose at the START of current step
 };
 
 #endif // TEACHWIDGET_H

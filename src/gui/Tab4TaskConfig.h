@@ -135,6 +135,7 @@ private:
     QString         flow_step_selected_stage_;     // 当前选中的"步骤" (stage_id)
     QVector<QString> flow_step_states_to_run_;     // 选中 stage 下所有 state_id, 顺序
     int              flow_step_run_idx_ = -1;      // 当前执行到第几个 (在 to_run_ 里的索引)
+    QVector<float>   flow_step_prev_joints_;       // last commanded joints, for dynamic step_ms calc
     class QTimer   *step_advance_timer_ = nullptr; // 在子状态间推进的计时器
     QPushButton    *btn_flow_start_   = nullptr;
     QPushButton    *btn_flow_stop_    = nullptr;

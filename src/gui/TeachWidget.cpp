@@ -407,13 +407,62 @@ void TeachWidget::startReplayConfirmed()
         return;
     }
 
+    // Fetch the live joint angles + current speed before kicking off.
+    // We need both for the dynamic-step-time calculator:
+    //   - replay_prev_joints_ seeds the first step's delta (this is
+    //     where the arm starts from)
+    //   - replay_speed_pct_   sets the °/s estimate used by the timer
+    //
+    // arm.get_angles + piper.get_status are issued in sequence; replay
+    // actually starts inside the second callback, so we know both are
+    // populated by the time executeStep(0) fires.
+    rpc_->call(Protocol::Methods::ARM_GET_ANGLES, QJsonObject{},
+        [this](QJsonObject reply) {
+            replay_prev_joints_.clear();
+            const QJsonArray arr = reply.value(Protocol::Fields::ANGLES).toArray();
+            for (const auto &v : arr) replay_prev_joints_.append(float(v.toDouble()));
+            rpc_->call("piper.get_status", QJsonObject{},
+                [this](QJsonObject st) {
+                    replay_speed_pct_ = st.value("speed_pct").toInt(30);
+                    if (replay_speed_pct_ < 5) replay_speed_pct_ = 5;
+                    kickReplay();
+                });
+        });
+}
+
+// Estimate how long the arm needs to travel from `from` to `to` at the
+// current speed. Used to set each step's effective duration so big
+// joint moves don't get cut off by the next step's command.
+//
+// Empirical baseline: Piper at 30% speed_pct does ~18 °/s per joint.
+// So 0.6 × speed_pct ≈ °/s for the slowest joint at default tune. The
+// +500 ms buffer absorbs accel/decel ramps + CAN propagation jitter.
+static int estimateStepMs(const QVector<float> &from,
+                          const QVector<float> &to,
+                          int speed_pct, int min_ms)
+{
+    float max_delta = 0.0f;
+    const int n = std::min(from.size(), to.size());
+    for (int i = 0; i < n; ++i) max_delta = std::max(max_delta, std::abs(to[i] - from[i]));
+    const float deg_per_s = 0.6f * float(std::max(5, speed_pct));
+    const int travel_ms = int(max_delta * 1000.0f / deg_per_s);
+    return std::max(min_ms, travel_ms + 500);
+}
+
+void TeachWidget::kickReplay()
+{
     btn_replay_->setEnabled(false);
     btn_stop_->setEnabled(true);
     replay_idx_ = 0;
     replay_step_dur_ms_ = step_ms_spin_->value();
+    // First-step duration based on travel from current pose to wp[0]
+    replay_effective_step_ms_ = estimateStepMs(
+        replay_prev_joints_, waypoints_[0].joints,
+        replay_speed_pct_, replay_step_dur_ms_);
     replay_start_ms_ = QDateTime::currentMSecsSinceEpoch();
     executeStep(0);
-    appendLog(QStringLiteral("▶ 开始回放"));
+    appendLog(QStringLiteral("▶ 开始回放 (speed=%1%%, 第1步预计 %2ms)")
+                  .arg(replay_speed_pct_).arg(replay_effective_step_ms_));
     replay_timer_->start();
 }
 
@@ -491,9 +540,14 @@ void TeachWidget::onReplayTick()
     const Waypoint &w = waypoints_[replay_idx_];
     const qint64 now = QDateTime::currentMSecsSinceEpoch();
     const qint64 elapsed = now - replay_start_ms_;
-    const qint64 want    = replay_step_dur_ms_ + w.dwell_ms;
+    // Use the dynamically estimated duration (based on this step's max
+    // joint delta) instead of a fixed step_ms — otherwise big joint
+    // moves get cut short when the next step fires too early.
+    const qint64 want    = replay_effective_step_ms_ + w.dwell_ms;
     if (elapsed >= want) {
-        // advance
+        // The arm should now be at waypoints_[replay_idx_] — use that
+        // as the "from" pose for the next step's duration estimate.
+        replay_prev_joints_ = w.joints;
         ++replay_idx_;
         if (replay_idx_ >= waypoints_.size()) {
             // Natural end of replay — let the arm finish travelling to
@@ -505,7 +559,13 @@ void TeachWidget::onReplayTick()
                              .arg(waypoints_.size()));
             return;
         }
+        // Recompute step duration for the new step
+        replay_effective_step_ms_ = estimateStepMs(
+            replay_prev_joints_, waypoints_[replay_idx_].joints,
+            replay_speed_pct_, replay_step_dur_ms_);
         replay_start_ms_ = now;
+        appendLog(QStringLiteral("→ 第 %1 点预计耗时 %2ms")
+                      .arg(replay_idx_ + 1).arg(replay_effective_step_ms_));
         executeStep(replay_idx_);
     }
 }
