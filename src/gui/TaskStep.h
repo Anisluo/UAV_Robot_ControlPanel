@@ -42,10 +42,15 @@ struct TaskStep {
 // MOVE_CARTESIAN   { x_mm, y_mm, z_mm, rx_deg, ry_deg, rz_deg,
 //                    mode: "P" | "L"  }
 // GRIPPER          { angle_mm: 0..70, force_pct: 0..100 }
-// AIRPORT_RAIL     { action: "lock"|"release", speed_rpm: int, max_ms: int }
-//                  Drives the rail-1+3 pair via airport.lock / airport.release.
-//                  The proc_gateway stall monitor cuts the motor on jam;
-//                  max_ms is the GUI-side upper bound before advancing.
+// AIRPORT_RAIL     { action: "lock"|"release"|"rail2_fwd"|"rail2_back",
+//                    speed_rpm: int, max_ms: int }
+//                  lock/release  → airport.lock / airport.release (rails 1+3
+//                                  pair, the platform clamp).
+//                  rail2_fwd/back → airport.set_speed (rail=1, ±speed_rpm).
+//                                   Rail 2 is the gripper-rail; backend
+//                                   monitor_rail_until_stall cuts the motor
+//                                   on stall (status 0x04/0x08).
+//                  max_ms = GUI-side upper bound before advancing.
 // AIRPORT_GRIPPER  { open: bool }
 // WAIT_DETECT_UAV  { present: bool, timeout_ms: int }
 //                  (present=true → wait until detected; false → wait until gone)

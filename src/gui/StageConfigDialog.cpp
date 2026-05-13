@@ -240,8 +240,10 @@ void StageConfigDialog::buildEditPanels()
         f->setContentsMargins(8, 8, 8, 8);
 
         ar_action_ = new QComboBox(w);
-        ar_action_->addItem(QStringLiteral("锁定"), "lock");
-        ar_action_->addItem(QStringLiteral("释放"), "release");
+        ar_action_->addItem(QStringLiteral("锁定 (导轨 1+3)"), "lock");
+        ar_action_->addItem(QStringLiteral("释放 (导轨 1+3)"), "release");
+        ar_action_->addItem(QStringLiteral("导轨 2 前进"),     "rail2_fwd");
+        ar_action_->addItem(QStringLiteral("导轨 2 后退"),     "rail2_back");
 
         ar_speed_ = new QSpinBox(w);
         ar_speed_->setRange(50, 3000);
@@ -265,8 +267,10 @@ void StageConfigDialog::buildEditPanels()
         f->addRow(QStringLiteral("速度"), ar_speed_);
         f->addRow(QStringLiteral("最长等待"), ar_max_ms_);
         f->addRow(new QLabel(
-            QStringLiteral("<i>导轨 1+3 联动锁定/释放。proc_gateway 检测到堵转<br>"
-                           "(status 0x04/0x08) 或读 CAN 失败 8 次自动停。</i>"),
+            QStringLiteral("<i>锁定/释放: 导轨 1+3 联动 (平台夹紧)。<br>"
+                           "导轨 2: 机场夹爪导轨 前进/后退。<br>"
+                           "proc_gateway 检测到堵转 (status 0x04/0x08)<br>"
+                           "或读 CAN 失败 8 次自动停。</i>"),
             w));
         editor_stack_->insertWidget(int(StepType::AIRPORT_RAIL), w);
     }
