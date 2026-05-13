@@ -23,6 +23,7 @@ private slots:
     void onRelease();
     void onRail2Move(bool forward);
     void onStopAll();
+    void onGripper(bool open);   // relay-driven airport jaw (proc_gateway/airport.gripper)
 
 private:
     void buildUi();
@@ -38,6 +39,8 @@ private:
     QPushButton *rail2_fwd_btn_{nullptr};
     QPushButton *rail2_back_btn_{nullptr};
     QPushButton *stop_all_btn_{nullptr};
+    QPushButton *gripper_open_btn_{nullptr};   // relay → 开 (jaw open)
+    QPushButton *gripper_close_btn_{nullptr};  // relay → 关 (jaw close)
 };
 
 #endif // AIRPORTWIDGET_H

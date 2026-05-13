@@ -123,6 +123,48 @@ void AirportWidget::buildUi()
 
     mainLayout->addWidget(rail2Panel);
 
+    // ── 继电器夹爪面板 ─────────────────────────────────────────────────
+    // proc_gateway/airport.gripper drives a GPIO relay (sysfs path under
+    // /sys/devices/platform/gpio-innohi/...) that mechanically opens or
+    // closes the airport jaw. No motor speed / position — pure on/off.
+    auto *gripperPanel = makePanel();
+    auto *gripperLayout = new QVBoxLayout(gripperPanel);
+    gripperLayout->setSpacing(6);
+    gripperLayout->addWidget(makeTitle("机场夹爪 (继电器)"));
+
+    auto *gripperBtnRow = new QHBoxLayout;
+    gripperBtnRow->setSpacing(8);
+
+    gripper_open_btn_ = new QPushButton("张开", this);
+    gripper_open_btn_->setFixedHeight(34);
+    gripper_open_btn_->setStyleSheet(
+        "QPushButton { background:#3a8; color:white; font-weight:bold;"
+        "              padding:4px 14px; border-radius:4px; }"
+        "QPushButton:hover { background:#4ba; }"
+        "QPushButton:disabled { background:#446; color:#aab; }");
+
+    gripper_close_btn_ = new QPushButton("夹紧", this);
+    gripper_close_btn_->setFixedHeight(34);
+    gripper_close_btn_->setStyleSheet(
+        "QPushButton { background:#c33; color:white; font-weight:bold;"
+        "              padding:4px 14px; border-radius:4px; }"
+        "QPushButton:hover { background:#e44; }"
+        "QPushButton:disabled { background:#553; color:#aab; }");
+
+    gripperBtnRow->addWidget(gripper_open_btn_, 1);
+    gripperBtnRow->addWidget(gripper_close_btn_, 1);
+    gripperBtnRow->addStretch();
+    gripperLayout->addLayout(gripperBtnRow);
+
+    auto *gripperHint = new QLabel(
+        "通过 GPIO 继电器控制机场夹爪开合 (airport.gripper RPC)。无速度/位置反馈。",
+        this);
+    gripperHint->setWordWrap(true);
+    gripperHint->setStyleSheet("color: #888aaa;");
+    gripperLayout->addWidget(gripperHint);
+
+    mainLayout->addWidget(gripperPanel);
+
     auto *btnRow = new QHBoxLayout;
     stop_all_btn_ = new QPushButton("全部急停", this);
     stop_all_btn_->setFixedHeight(30);
@@ -139,6 +181,8 @@ void AirportWidget::buildUi()
     connect(rail2_fwd_btn_, &QPushButton::clicked, this, [this]() { onRail2Move(true); });
     connect(rail2_back_btn_, &QPushButton::clicked, this, [this]() { onRail2Move(false); });
     connect(stop_all_btn_, &QPushButton::clicked, this, &AirportWidget::onStopAll);
+    connect(gripper_open_btn_,  &QPushButton::clicked, this, [this]() { onGripper(true);  });
+    connect(gripper_close_btn_, &QPushButton::clicked, this, [this]() { onGripper(false); });
 }
 
 void AirportWidget::syncSliderAndSpin(QSlider *slider, QSpinBox *spinbox, int value)
@@ -203,4 +247,12 @@ void AirportWidget::onStopAll()
 {
     if (!rpc_ || !rpc_->isConnected()) return;
     rpc_->call(Protocol::Methods::AIRPORT_STOP_ALL, QJsonObject{});
+}
+
+void AirportWidget::onGripper(bool open)
+{
+    if (!rpc_ || !rpc_->isConnected()) return;
+    QJsonObject params;
+    params[Protocol::Fields::OPEN] = open;
+    rpc_->call(Protocol::Methods::AIRPORT_GRIPPER, params);
 }
