@@ -58,10 +58,10 @@ QString TaskStep::summary() const
             const QString action = params.value("action", "lock").toString();
             const int rpm = params.value("speed_rpm", 1500).toInt();
             QString name;
-            if      (action == "release")     name = QStringLiteral("释放");
-            else if (action == "rail2_fwd")   name = QStringLiteral("导轨2 前进");
-            else if (action == "rail2_back")  name = QStringLiteral("导轨2 后退");
-            else                              name = QStringLiteral("锁定");
+            if      (action == "release")     name = QStringLiteral("平台释放(1+3)");
+            else if (action == "rail2_fwd")   name = QStringLiteral("机场夹爪导轨 前进");
+            else if (action == "rail2_back")  name = QStringLiteral("机场夹爪导轨 后退");
+            else                              name = QStringLiteral("平台锁定(1+3)");
             return QStringLiteral("%1 @ %2rpm  → 堵转停").arg(name).arg(rpm);
         }
         case StepType::AIRPORT_GRIPPER:

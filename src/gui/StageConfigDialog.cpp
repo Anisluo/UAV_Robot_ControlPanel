@@ -240,10 +240,10 @@ void StageConfigDialog::buildEditPanels()
         f->setContentsMargins(8, 8, 8, 8);
 
         ar_action_ = new QComboBox(w);
-        ar_action_->addItem(QStringLiteral("锁定 (导轨 1+3)"), "lock");
-        ar_action_->addItem(QStringLiteral("释放 (导轨 1+3)"), "release");
-        ar_action_->addItem(QStringLiteral("导轨 2 前进"),     "rail2_fwd");
-        ar_action_->addItem(QStringLiteral("导轨 2 后退"),     "rail2_back");
+        ar_action_->addItem(QStringLiteral("机场平台锁定 (导轨 1+3)"),  "lock");
+        ar_action_->addItem(QStringLiteral("机场平台释放 (导轨 1+3)"),  "release");
+        ar_action_->addItem(QStringLiteral("机场夹爪导轨 前进 (导轨 2)"), "rail2_fwd");
+        ar_action_->addItem(QStringLiteral("机场夹爪导轨 后退 (导轨 2)"), "rail2_back");
 
         ar_speed_ = new QSpinBox(w);
         ar_speed_->setRange(50, 3000);
