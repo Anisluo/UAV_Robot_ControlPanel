@@ -9,6 +9,7 @@
 #include "MeshMapWidget.h"
 
 class QLineEdit;
+class QComboBox;
 class QSpinBox;
 class QLabel;
 class QPushButton;
@@ -71,7 +72,7 @@ private:
 
     // KMZ 路径规划下发
     QLineEdit   *kmz_path_edit_;
-    QLineEdit   *kmz_ip_edit_;
+    QComboBox   *kmz_ip_combo_;   // 192.168.1.102..106 (drone mesh nodes)
     QSpinBox    *kmz_port_spin_;
     QPushButton *btn_kmz_load_;
     QPushButton *btn_kmz_send_;

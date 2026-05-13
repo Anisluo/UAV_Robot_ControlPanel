@@ -9,6 +9,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLabel>
+#include <QComboBox>
 #include <QLineEdit>
 #include <QHostAddress>
 #include <QPushButton>
@@ -146,9 +147,11 @@ void DroneWidget::buildUi()
     kmzIpLabel->setStyleSheet("color: #00c8d7; font-family: Consolas;");
     kmzIpLabel->setFixedWidth(64);
 
-    kmz_ip_edit_ = new QLineEdit("192.168.1.101", this);
-    kmz_ip_edit_->setFixedWidth(130);
-    kmz_ip_edit_->setPlaceholderText("IP 地址");
+    kmz_ip_combo_ = new QComboBox(this);
+    for (int octet : kDroneNodes) {
+        kmz_ip_combo_->addItem(QStringLiteral("192.168.1.%1").arg(octet));
+    }
+    kmz_ip_combo_->setFixedWidth(130);
 
     auto *kmzPortLabel = new QLabel("端口:", this);
     kmzPortLabel->setStyleSheet("color: #00c8d7; font-family: Consolas;");
@@ -164,7 +167,7 @@ void DroneWidget::buildUi()
     btn_kmz_send_->setEnabled(false);
 
     kmzTargetRow->addWidget(kmzIpLabel);
-    kmzTargetRow->addWidget(kmz_ip_edit_);
+    kmzTargetRow->addWidget(kmz_ip_combo_);
     kmzTargetRow->addSpacing(8);
     kmzTargetRow->addWidget(kmzPortLabel);
     kmzTargetRow->addWidget(kmz_port_spin_);
@@ -432,7 +435,7 @@ void DroneWidget::onKmzSend()
         kmz_socket_->abort();
     }
 
-    const QString ip   = kmz_ip_edit_->text().trimmed();
+    const QString ip   = kmz_ip_combo_->currentText().trimmed();
     const quint16 port = static_cast<quint16>(kmz_port_spin_->value());
 
     kmz_bytes_written_ = 0;
