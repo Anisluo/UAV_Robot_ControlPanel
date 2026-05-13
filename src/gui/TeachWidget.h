@@ -66,6 +66,7 @@ private:
     void rebuildList();
     void appendLog(const QString &msg);
     void executeStep(int idx);
+    void startReplayConfirmed();    // continuation after pre-flight ctrl_mode check
 
     RpcClient *rpc_;
 

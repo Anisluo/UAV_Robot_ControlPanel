@@ -372,6 +372,33 @@ void TeachWidget::onStartReplay()
         appendLog(QStringLiteral("⚠ RPC 未连接"));
         return;
     }
+    // Pre-flight: confirm the arm is in CAN_CTRL. After a physical-
+    // button teach session it'll likely still be in ctrl_mode=2
+    // TEACHING, and arm.move_joints in that state is silently dropped
+    // by the firmware → arm doesn't move and the operator sees no
+    // visible effect from the replay. Ask user to exit teach first.
+    rpc_->call("piper.get_status", QJsonObject{},
+        [this](QJsonObject status) {
+            const int ctrl_mode    = status.value("ctrl_mode").toInt(1);
+            const int teach_status = status.value("teach_status").toInt(0);
+            if (ctrl_mode != 1 || teach_status != 0) {
+                QString msg = QStringLiteral(
+                    "机械臂当前不在 CAN_CTRL (ctrl_mode=%1, teach_status=%2).\n"
+                    "回放会被固件静默丢弃 — 机械臂不会动.\n\n"
+                    "请先扶住机械臂, 点 急停 → 自动恢复后 → 使能,\n"
+                    "状态栏显示 CAN_CTRL 之后再点 回放.")
+                    .arg(ctrl_mode).arg(teach_status);
+                QMessageBox::warning(this, QStringLiteral("不能回放"), msg);
+                appendLog(QStringLiteral("⚠ 取消回放: 机械臂不在 CAN_CTRL"));
+                return;
+            }
+            startReplayConfirmed();
+        });
+}
+
+// Split out so the pre-flight status check can call back into it.
+void TeachWidget::startReplayConfirmed()
+{
     if (QMessageBox::warning(this, QStringLiteral("回放确认"),
             QStringLiteral("即将回放 %1 个点到真实机械臂\n"
                            "确保工作空间无障碍 + 急停在手边")
@@ -407,12 +434,23 @@ void TeachWidget::executeStep(int idx)
     if (idx < 0 || idx >= waypoints_.size()) return;
     const Waypoint &w = waypoints_[idx];
 
-    // 1. arm.move_joints
+    // 1. arm.move_joints — with a callback so that when proc_piper
+    // refuses (e.g. ctrl_mode!=CAN_CTRL because the arm is stuck in
+    // TEACHING), the operator SEES the error in the log instead of
+    // wondering why the arm isn't moving.
     QJsonObject p;
     QJsonArray j;
     for (float v : w.joints) j.append(v);
     p[Protocol::Fields::JOINTS] = j;
-    rpc_->call(Protocol::Methods::ARM_MOVE_JOINTS, p);
+    const int step_num = idx + 1;
+    rpc_->call(Protocol::Methods::ARM_MOVE_JOINTS, p,
+        [this, step_num](QJsonObject reply) {
+            if (!reply.value("ok").toBool(true)) {
+                const QString err = reply.value("error").toString();
+                appendLog(QStringLiteral("⚠ 第 %1 点 move_joints 拒绝: %2")
+                              .arg(step_num).arg(err));
+            }
+        });
 
     // 2. gripper command (if state changed). proc_piper's
     // piper.set_gripper_angle expects "angle_mm" + "effort_mNm". The
