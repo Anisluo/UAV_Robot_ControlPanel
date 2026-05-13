@@ -1,11 +1,14 @@
 #include "DroneWidget.h"
 #include "MeshMapWidget.h"
 
+#include <QDir>
 #include <QFile>
 #include <QFileDialog>
+#include <QFileInfo>
 #include <QFrame>
 #include <QGridLayout>
 #include <QHBoxLayout>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLabel>
@@ -13,7 +16,10 @@
 #include <QLineEdit>
 #include <QHostAddress>
 #include <QPushButton>
+#include <QSettings>
 #include <QSpinBox>
+#include <QStandardPaths>
+#include <QTcpServer>
 #include <QTcpSocket>
 #include <QTime>
 #include <QTimer>
@@ -181,6 +187,84 @@ void DroneWidget::buildUi()
 
     connect(btn_kmz_load_, &QPushButton::clicked, this, &DroneWidget::onKmzLoadFile);
     connect(btn_kmz_send_, &QPushButton::clicked, this, &DroneWidget::onKmzSend);
+
+    // ── 远端控制 (line-delimited JSON server) ──────────────────────────────
+    auto *remoteHr = new QFrame(this);
+    remoteHr->setFrameShape(QFrame::HLine);
+    remoteHr->setStyleSheet("color: #353650;");
+    layout->addWidget(remoteHr);
+
+    auto *remoteTitle = new QLabel(QStringLiteral("远端控制 (JSON 侦听)"), this);
+    remoteTitle->setStyleSheet("color: #00c8d7; font-family: Consolas; font-weight: bold;");
+    layout->addWidget(remoteTitle);
+
+    QSettings persisted;
+    const QString def_kmz_dir = persisted
+        .value("DroneWidget/kmz_dir",
+               QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation) + "/UAV_KMZ")
+        .toString();
+    const int def_port = persisted.value("DroneWidget/remote_port", 7100).toInt();
+
+    auto *dirRow = new QHBoxLayout;
+    auto *dirLabel = new QLabel(QStringLiteral("KMZ 目录:"), this);
+    dirLabel->setStyleSheet("color: #aab6cc; font-family: Consolas;");
+    dirLabel->setFixedWidth(70);
+    kmz_dir_edit_ = new QLineEdit(def_kmz_dir, this);
+    btn_kmz_dir_browse_ = new QPushButton(QStringLiteral("浏览…"), this);
+    btn_kmz_dir_browse_->setFixedWidth(70);
+    dirRow->addWidget(dirLabel);
+    dirRow->addWidget(kmz_dir_edit_, 1);
+    dirRow->addWidget(btn_kmz_dir_browse_);
+    layout->addLayout(dirRow);
+
+    auto *listenRow = new QHBoxLayout;
+    auto *portLabel = new QLabel(QStringLiteral("侦听端口:"), this);
+    portLabel->setStyleSheet("color: #aab6cc; font-family: Consolas;");
+    portLabel->setFixedWidth(70);
+    remote_port_spin_ = new QSpinBox(this);
+    remote_port_spin_->setRange(1024, 65535);
+    remote_port_spin_->setValue(def_port);
+    remote_port_spin_->setFixedWidth(90);
+
+    btn_remote_toggle_ = new QPushButton(QStringLiteral("开启侦听"), this);
+    btn_remote_toggle_->setCheckable(true);
+    btn_remote_toggle_->setFixedHeight(28);
+    btn_remote_toggle_->setStyleSheet(
+        "QPushButton { background:#445; color:#ddd; border-radius:4px;"
+        "              padding:2px 14px; font-weight:bold; }"
+        "QPushButton:checked { background:#3a8; color:white; }"
+        "QPushButton:hover { background:#556; }"
+        "QPushButton:checked:hover { background:#4ba; }");
+
+    listenRow->addWidget(portLabel);
+    listenRow->addWidget(remote_port_spin_);
+    listenRow->addStretch();
+    listenRow->addWidget(btn_remote_toggle_);
+    layout->addLayout(listenRow);
+
+    remote_status_label_ = new QLabel(QStringLiteral("未侦听"), this);
+    remote_status_label_->setStyleSheet("font-family: Consolas; color: #888aaa;");
+    layout->addWidget(remote_status_label_);
+
+    auto *remoteHelp = new QLabel(
+        QStringLiteral("<i>协议: 每行一个 JSON. 例:<br>"
+                       "  {\"id\":1,\"cmd\":\"deploy_kmz\",\"name\":\"plan1\",\"target\":\"192.168.1.102\",\"port\":14550}<br>"
+                       "  {\"id\":2,\"cmd\":\"list_kmz\"}    /    {\"id\":3,\"cmd\":\"ping\"}<br>"
+                       "回复同 id, 含 ok=true/false. 文件名可省略 .kmz 扩展.</i>"),
+        this);
+    remoteHelp->setStyleSheet("color: #6b7388;");
+    remoteHelp->setWordWrap(true);
+    layout->addWidget(remoteHelp);
+
+    connect(btn_kmz_dir_browse_, &QPushButton::clicked, this, &DroneWidget::onKmzDirBrowse);
+    connect(btn_remote_toggle_,  &QPushButton::toggled, this, &DroneWidget::onRemoteToggle);
+    connect(kmz_dir_edit_, &QLineEdit::editingFinished, this, [this]() {
+        QSettings s; s.setValue("DroneWidget/kmz_dir", kmz_dir_edit_->text());
+    });
+    connect(remote_port_spin_, QOverload<int>::of(&QSpinBox::valueChanged),
+            this, [this](int v) {
+        QSettings s; s.setValue("DroneWidget/remote_port", v);
+    });
 }
 
 void DroneWidget::createNodeCard(QGridLayout *grid, int row, int octet)
@@ -463,7 +547,8 @@ void DroneWidget::onKmzBytesWritten(qint64 bytes)
 
 void DroneWidget::onKmzDisconnected()
 {
-    if (kmz_bytes_written_ >= kmz_data_.size() && !kmz_data_.isEmpty()) {
+    const bool ok = kmz_bytes_written_ >= kmz_data_.size() && !kmz_data_.isEmpty();
+    if (ok) {
         kmz_status_label_->setText(
             QString("下发完成  %1 字节").arg(kmz_bytes_written_));
         kmz_status_label_->setStyleSheet("font-family: Consolas; color: #4caf50;");
@@ -472,6 +557,26 @@ void DroneWidget::onKmzDisconnected()
         kmz_status_label_->setStyleSheet("font-family: Consolas; color: #888aaa;");
     }
     btn_kmz_send_->setEnabled(!kmz_data_.isEmpty());
+
+    // If this deployment was kicked off by a remote command, send the
+    // final result back to that client and clear pending state. Any
+    // failure path that goes through onKmzError handles its own reply.
+    if (pending_remote_client_) {
+        QJsonObject reply;
+        reply["id"]    = pending_remote_req_id_;
+        reply["cmd"]   = "deploy_kmz";
+        reply["ok"]    = ok;
+        reply["stage"] = "done";
+        reply["name"]  = pending_remote_name_;
+        reply["bytes"] = qint64(kmz_bytes_written_);
+        reply["target"] = kmz_ip_combo_->currentText();
+        reply["port"]   = kmz_port_spin_->value();
+        if (!ok) reply["error"] = "transfer incomplete";
+        sendRemoteReply(pending_remote_client_, reply);
+        pending_remote_client_ = nullptr;
+        pending_remote_req_id_ = 0;
+        pending_remote_name_.clear();
+    }
 }
 
 void DroneWidget::onKmzError(QAbstractSocket::SocketError)
@@ -479,4 +584,285 @@ void DroneWidget::onKmzError(QAbstractSocket::SocketError)
     kmz_status_label_->setText("错误: " + kmz_socket_->errorString());
     kmz_status_label_->setStyleSheet("font-family: Consolas; color: #f44336;");
     btn_kmz_send_->setEnabled(!kmz_data_.isEmpty());
+
+    // If this failure was a remote-triggered deployment, report back.
+    if (pending_remote_client_) {
+        QJsonObject reply;
+        reply["id"]    = pending_remote_req_id_;
+        reply["ok"]    = false;
+        reply["stage"] = "send_error";
+        reply["error"] = kmz_socket_->errorString();
+        if (!pending_remote_name_.isEmpty()) reply["name"] = pending_remote_name_;
+        sendRemoteReply(pending_remote_client_, reply);
+        pending_remote_client_ = nullptr;
+        pending_remote_req_id_ = 0;
+        pending_remote_name_.clear();
+    }
+}
+
+// ─── 远端 JSON 控制 ───────────────────────────────────────────────────────────
+
+void DroneWidget::onKmzDirBrowse()
+{
+    const QString dir = QFileDialog::getExistingDirectory(
+        this, QStringLiteral("选择 KMZ 库目录"),
+        kmz_dir_edit_->text());
+    if (dir.isEmpty()) return;
+    kmz_dir_edit_->setText(dir);
+    QSettings s; s.setValue("DroneWidget/kmz_dir", dir);
+}
+
+void DroneWidget::onRemoteToggle(bool checked)
+{
+    if (!checked) {
+        if (remote_server_) {
+            remote_server_->close();
+            remote_server_->deleteLater();
+            remote_server_ = nullptr;
+        }
+        btn_remote_toggle_->setText(QStringLiteral("开启侦听"));
+        remote_status_label_->setText(QStringLiteral("未侦听"));
+        remote_status_label_->setStyleSheet("font-family: Consolas; color: #888aaa;");
+        return;
+    }
+
+    const quint16 port = static_cast<quint16>(remote_port_spin_->value());
+    remote_server_ = new QTcpServer(this);
+    if (!remote_server_->listen(QHostAddress::Any, port)) {
+        remote_status_label_->setText(
+            QStringLiteral("侦听失败: %1").arg(remote_server_->errorString()));
+        remote_status_label_->setStyleSheet("font-family: Consolas; color: #f44336;");
+        remote_server_->deleteLater();
+        remote_server_ = nullptr;
+        btn_remote_toggle_->setChecked(false);
+        return;
+    }
+    connect(remote_server_, &QTcpServer::newConnection,
+            this, &DroneWidget::onRemoteNewConnection);
+    btn_remote_toggle_->setText(QStringLiteral("停止侦听"));
+    remote_status_label_->setText(
+        QStringLiteral("侦听中 0.0.0.0:%1").arg(port));
+    remote_status_label_->setStyleSheet("font-family: Consolas; color: #4caf50;");
+}
+
+void DroneWidget::onRemoteNewConnection()
+{
+    if (!remote_server_) return;
+    while (remote_server_->hasPendingConnections()) {
+        QTcpSocket *client = remote_server_->nextPendingConnection();
+        // Buffer line-delimited JSON per client; the buffer lives on the
+        // socket via dynamic property so we don't need a per-socket hash.
+        client->setProperty("rx_buf", QByteArray());
+        connect(client, &QTcpSocket::readyRead,
+                this, &DroneWidget::onRemoteClientReadyRead);
+        connect(client, &QTcpSocket::disconnected,
+                this, &DroneWidget::onRemoteClientDisconnected);
+        remote_status_label_->setText(
+            QStringLiteral("已连接 %1:%2")
+                .arg(client->peerAddress().toString()).arg(client->peerPort()));
+    }
+}
+
+void DroneWidget::onRemoteClientReadyRead()
+{
+    auto *client = qobject_cast<QTcpSocket*>(sender());
+    if (!client) return;
+    QByteArray buf = client->property("rx_buf").toByteArray();
+    buf.append(client->readAll());
+    int nl;
+    while ((nl = buf.indexOf('\n')) >= 0) {
+        QByteArray line = buf.left(nl).trimmed();
+        buf.remove(0, nl + 1);
+        if (line.isEmpty()) continue;
+        QJsonParseError err{};
+        const QJsonDocument doc = QJsonDocument::fromJson(line, &err);
+        if (err.error != QJsonParseError::NoError || !doc.isObject()) {
+            QJsonObject reply;
+            reply["ok"]    = false;
+            reply["error"] = QStringLiteral("parse error: %1").arg(err.errorString());
+            sendRemoteReply(client, reply);
+            continue;
+        }
+        handleRemoteCommand(client, doc.object());
+    }
+    client->setProperty("rx_buf", buf);
+}
+
+void DroneWidget::onRemoteClientDisconnected()
+{
+    auto *client = qobject_cast<QTcpSocket*>(sender());
+    if (!client) return;
+    if (pending_remote_client_ == client) {
+        pending_remote_client_ = nullptr;
+        pending_remote_req_id_ = 0;
+        pending_remote_name_.clear();
+    }
+    client->deleteLater();
+}
+
+void DroneWidget::sendRemoteReply(QTcpSocket *client, const QJsonObject &reply)
+{
+    if (!client || client->state() != QAbstractSocket::ConnectedState) return;
+    const QByteArray bytes = QJsonDocument(reply).toJson(QJsonDocument::Compact) + '\n';
+    client->write(bytes);
+    client->flush();
+}
+
+QString DroneWidget::resolveKmzPath(const QString &name) const
+{
+    const QString dir = kmz_dir_edit_->text().trimmed();
+    if (dir.isEmpty() || name.isEmpty()) return {};
+    // Sanitize: reject path-traversal in name.
+    if (name.contains("..") || name.contains('/') || name.contains('\\')) return {};
+    QDir d(dir);
+    // Try name as-is first, then with .kmz extension.
+    if (d.exists(name)) return d.absoluteFilePath(name);
+    const QString with_ext = name + QStringLiteral(".kmz");
+    if (d.exists(with_ext)) return d.absoluteFilePath(with_ext);
+    return {};
+}
+
+bool DroneWidget::beginRemoteDeploy(const QString &full_path,
+                                     const QString &target_ip,
+                                     quint16 target_port,
+                                     QString *err_out)
+{
+    if (pending_remote_client_) {
+        if (err_out) *err_out = QStringLiteral("busy: a remote deployment is already in progress");
+        return false;
+    }
+    if (kmz_socket_ && kmz_socket_->state() != QAbstractSocket::UnconnectedState) {
+        if (err_out) *err_out = QStringLiteral("busy: a manual deployment is already in progress");
+        return false;
+    }
+    QFile f(full_path);
+    if (!f.open(QIODevice::ReadOnly)) {
+        if (err_out) *err_out = QStringLiteral("open failed: %1").arg(f.errorString());
+        return false;
+    }
+    kmz_data_ = f.readAll();
+    f.close();
+    if (kmz_data_.isEmpty()) {
+        if (err_out) *err_out = QStringLiteral("file is empty");
+        return false;
+    }
+    kmz_path_edit_->setText(full_path);
+
+    // Honor explicit target IP if given; otherwise stick with whatever the
+    // dropdown currently shows.
+    if (!target_ip.isEmpty()) {
+        int idx = kmz_ip_combo_->findText(target_ip);
+        if (idx >= 0) {
+            kmz_ip_combo_->setCurrentIndex(idx);
+        } else {
+            // Add it (in case the remote names a node not in our preset).
+            kmz_ip_combo_->insertItem(0, target_ip);
+            kmz_ip_combo_->setCurrentIndex(0);
+        }
+    }
+    if (target_port > 0) kmz_port_spin_->setValue(target_port);
+
+    kmz_bytes_written_ = 0;
+    btn_kmz_send_->setEnabled(false);
+    kmz_status_label_->setText(
+        QStringLiteral("[远端] 下发 %1 (%2 字节) → %3:%4")
+            .arg(QFileInfo(full_path).fileName())
+            .arg(kmz_data_.size())
+            .arg(kmz_ip_combo_->currentText())
+            .arg(kmz_port_spin_->value()));
+    kmz_status_label_->setStyleSheet("font-family: Consolas; color: #ff9800;");
+    if (kmz_socket_->state() != QAbstractSocket::UnconnectedState) {
+        kmz_socket_->abort();
+    }
+    kmz_socket_->connectToHost(kmz_ip_combo_->currentText().trimmed(),
+                               static_cast<quint16>(kmz_port_spin_->value()));
+    return true;
+}
+
+void DroneWidget::handleRemoteCommand(QTcpSocket *client, const QJsonObject &req)
+{
+    const int req_id    = req.value("id").toInt(0);
+    const QString cmd   = req.value("cmd").toString();
+    QJsonObject reply;
+    reply["id"]  = req_id;
+    reply["cmd"] = cmd;
+
+    if (cmd == "ping") {
+        reply["ok"] = true;
+        sendRemoteReply(client, reply);
+        return;
+    }
+
+    if (cmd == "list_kmz") {
+        const QString dir_path = kmz_dir_edit_->text().trimmed();
+        QDir d(dir_path);
+        if (!d.exists()) {
+            reply["ok"]    = false;
+            reply["error"] = QStringLiteral("kmz dir not found: %1").arg(dir_path);
+            sendRemoteReply(client, reply);
+            return;
+        }
+        QJsonArray files;
+        for (const QString &name :
+             d.entryList({"*.kmz"}, QDir::Files | QDir::Readable, QDir::Name)) {
+            files.append(name);
+        }
+        reply["ok"]    = true;
+        reply["dir"]   = d.absolutePath();
+        reply["files"] = files;
+        sendRemoteReply(client, reply);
+        return;
+    }
+
+    if (cmd == "deploy_kmz") {
+        const QString name = req.value("name").toString();
+        const QString target_ip =
+            req.value("target").toString(kmz_ip_combo_->currentText());
+        const int target_port = req.value("port").toInt(kmz_port_spin_->value());
+        if (name.isEmpty()) {
+            reply["ok"]    = false;
+            reply["error"] = "missing 'name'";
+            sendRemoteReply(client, reply);
+            return;
+        }
+        const QString full_path = resolveKmzPath(name);
+        if (full_path.isEmpty()) {
+            reply["ok"]    = false;
+            reply["error"] = QStringLiteral("file not found: %1 (in %2)")
+                                 .arg(name, kmz_dir_edit_->text());
+            sendRemoteReply(client, reply);
+            return;
+        }
+        QString err;
+        if (!beginRemoteDeploy(full_path, target_ip,
+                                static_cast<quint16>(target_port), &err)) {
+            reply["ok"]    = false;
+            reply["error"] = err;
+            sendRemoteReply(client, reply);
+            return;
+        }
+        // Record so onKmzDisconnected / onKmzError can deliver the final
+        // result back to this caller.
+        pending_remote_client_ = client;
+        pending_remote_req_id_ = req_id;
+        pending_remote_name_   = name;
+
+        // Send an interim ack so the remote knows we accepted the request.
+        QJsonObject ack;
+        ack["id"]      = req_id;
+        ack["cmd"]     = cmd;
+        ack["ok"]      = true;
+        ack["stage"]   = "accepted";
+        ack["name"]    = name;
+        ack["resolved"]= full_path;
+        ack["target"]  = target_ip;
+        ack["port"]    = target_port;
+        ack["bytes"]   = kmz_data_.size();
+        sendRemoteReply(client, ack);
+        return;
+    }
+
+    reply["ok"]    = false;
+    reply["error"] = QStringLiteral("unknown cmd: %1").arg(cmd);
+    sendRemoteReply(client, reply);
 }

@@ -17,6 +17,8 @@ class QFrame;
 class QTimer;
 class QUdpSocket;
 class QTcpSocket;
+class QTcpServer;
+class QJsonObject;
 
 class DroneWidget : public QGroupBox {
     Q_OBJECT
@@ -37,6 +39,16 @@ private slots:
     void onKmzDisconnected();
     void onKmzError(QAbstractSocket::SocketError err);
 
+    // Remote control: a line-delimited JSON TCP server. Remote platforms
+    // send {"id":N,"cmd":"deploy_kmz","name":"<file>","target":"192.168.1.10X","port":14550}
+    // and HostGUI loads the named file from the configured KMZ library
+    // directory, forwards it to the drone, and replies with the result.
+    void onRemoteToggle(bool checked);
+    void onRemoteNewConnection();
+    void onRemoteClientReadyRead();
+    void onRemoteClientDisconnected();
+    void onKmzDirBrowse();
+
 private:
     struct PendingRequest {
         int     octet{0};
@@ -50,6 +62,13 @@ private:
     void updateNodeTimestamp(int octet, const QString &text);
     QString nodeIp(int octet) const;
     void sendRpcRequest(int octet, const QString &method);
+
+    // Remote-control helpers
+    void handleRemoteCommand(QTcpSocket *client, const QJsonObject &req);
+    void sendRemoteReply(QTcpSocket *client, const QJsonObject &reply);
+    QString resolveKmzPath(const QString &name) const;
+    bool   beginRemoteDeploy(const QString &full_path, const QString &target_ip,
+                              quint16 target_port, QString *err_out);
 
     QLineEdit   *target_host_edit_;
     QLabel      *status_label_;
@@ -80,6 +99,22 @@ private:
     QTcpSocket  *kmz_socket_;
     QByteArray   kmz_data_;
     qint64       kmz_bytes_written_{0};
+
+    // Remote-control panel: a line-delimited JSON TCP server (default 7100).
+    // Persists port + KMZ library dir via QSettings under DroneWidget/...
+    QLineEdit   *kmz_dir_edit_         = nullptr;
+    QPushButton *btn_kmz_dir_browse_   = nullptr;
+    QSpinBox    *remote_port_spin_     = nullptr;
+    QPushButton *btn_remote_toggle_    = nullptr;
+    QLabel      *remote_status_label_  = nullptr;
+    QTcpServer  *remote_server_        = nullptr;
+
+    // When a remote-triggered deployment is in flight, remember which
+    // client connection + request id is waiting for the result so
+    // onKmzDisconnected can route the final reply. nullptr → idle.
+    QTcpSocket  *pending_remote_client_ = nullptr;
+    int          pending_remote_req_id_ = 0;
+    QString      pending_remote_name_;     // for echoing back
 };
 
 #endif // DRONEWIDGET_H
