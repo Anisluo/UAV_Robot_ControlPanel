@@ -903,23 +903,89 @@ void Tab4TaskConfig::onFlowStart()
                                        .arg(first.label));
         flow_sim_timer_->start();
     } else {
-        appendLog("info", "实机模式启动 — 调用 swap.start (proc_battery_swap 须运行中)");
-        QJsonObject params;
-        rpc_->call("swap.start", params,
-            [this](QJsonObject reply) {
-                if (reply.value("ok").toBool(false)) {
-                    appendLog("info", "swap.start ok, 开始轮询状态");
-                    swap_poll_timer_->start();
-                } else {
-                    const QString err = reply.value("error").toString("RPC failed");
-                    appendLog("error", QString("swap.start 失败: %1").arg(err));
-                    flow_status_label_->setText(QString("启动失败: %1").arg(err));
-                    flow_running_ = false;
-                    btn_flow_start_->setEnabled(true);
-                    btn_flow_stop_->setEnabled(false);
-                }
-            });
+        // 实机模式 = 把 9 个 stage 的录制脚本一个接一个串起来跑, 用单步那套
+        // dispatchScriptStep + step_advance_timer 机制 (跟单步唯一区别是
+        // 当前 stage 跑完不停, 自动跳到下一个 stage).
+        if (!rpc_ || !rpc_->isConnected()) {
+            appendLog("error", "实机模式: RPC 未连接");
+            flow_running_ = false;
+            btn_flow_start_->setEnabled(true);
+            btn_flow_stop_->setEnabled(false);
+            return;
+        }
+        appendLog("info", "实机模式启动 — 串行执行 9 个 stage 的录制脚本");
+        flow_real_sequential_  = true;
+        flow_real_stage_idx_   = -1;   // startRealStage 会从 0 开始找
+
+        // step_advance_timer 没建过先建
+        if (!step_advance_timer_) {
+            step_advance_timer_ = new QTimer(this);
+            step_advance_timer_->setInterval(1500);
+            connect(step_advance_timer_, &QTimer::timeout,
+                    this, &Tab4TaskConfig::onFlowStepAdvance);
+        }
+
+        // 从 stage 0 开始 — startRealStage 会跳过没录脚本的 stage
+        if (!startRealStage(0)) {
+            appendLog("warn", "实机模式: 9 个 stage 全部没有录制脚本, 无事可做");
+            flow_real_sequential_ = false;
+            flow_running_ = false;
+            btn_flow_start_->setEnabled(true);
+            btn_flow_stop_->setEnabled(false);
+        }
     }
+}
+
+// 实机串行模式专用 — 从 from_idx 开始往后找第一个有录制脚本的 stage 装上去
+// 并跑起来. 没找到返回 false (表示流程到底了, 收摊).
+bool Tab4TaskConfig::startRealStage(int from_idx)
+{
+    const auto &stages = TaskFlowWidget::stages();
+    for (int i = from_idx; i < stages.size(); ++i) {
+        const QString sid = stages[i].id;
+        const auto it = stage_scripts_.constFind(sid);
+        if (it == stage_scripts_.constEnd() || it.value().isEmpty()) {
+            appendLog("info",
+                QString("[实机] 跳过 stage %1 (%2): 无录制脚本")
+                    .arg(i + 1).arg(stages[i].title));
+            continue;
+        }
+        flow_real_stage_idx_      = i;
+        flow_step_selected_stage_ = sid;
+        flow_step_states_to_run_  = TaskFlowWidget::statesInStage(sid);
+        flow_step_script_         = it.value();
+        flow_step_use_script_     = true;
+        flow_step_run_idx_        = 0;
+        flow_step_prev_joints_.clear();
+
+        flow_widget_->setSelectedStage(sid);
+        if (!flow_step_states_to_run_.isEmpty()) {
+            flow_widget_->setCurrentState(flow_step_states_to_run_.first());
+        }
+        flow_status_label_->setText(
+            QString("[实机] %1/%2 · %3 (%4 步)")
+                .arg(i + 1).arg(stages.size()).arg(stages[i].title)
+                .arg(flow_step_script_.size()));
+        appendLog("info",
+            QString("[实机] 进入 stage %1/%2 — %3 (%4 步)")
+                .arg(i + 1).arg(stages.size()).arg(stages[i].title)
+                .arg(flow_step_script_.size()));
+
+        // 立刻打第 0 步, timer 之后逐步推
+        onFlowStepAdvance();
+        step_advance_timer_->start();
+        return true;
+    }
+    // 找不到下一个 → 全跑完了
+    flow_real_sequential_ = false;
+    flow_real_stage_idx_  = -1;
+    if (step_advance_timer_) step_advance_timer_->stop();
+    flow_running_ = false;
+    btn_flow_start_->setEnabled(true);
+    btn_flow_stop_->setEnabled(false);
+    flow_status_label_->setText("[实机] 全部 stage 跑完 ✓");
+    appendLog("info", "[实机] ✓ 9 个 stage 全部跑完");
+    return false;
 }
 
 void Tab4TaskConfig::onFlowStop()
@@ -939,7 +1005,19 @@ void Tab4TaskConfig::onFlowStop()
             QMetaObject::invokeMethod(sim_worker_, "startAnglePolling",
                                       Qt::QueuedConnection, Q_ARG(int, 200));
         }
+    } else if (flow_real_sequential_) {
+        // 实机串行模式: 停步进 timer, 清状态
+        if (step_advance_timer_) step_advance_timer_->stop();
+        flow_real_sequential_ = false;
+        flow_real_stage_idx_  = -1;
+        flow_step_run_idx_    = -1;
+        flow_step_use_script_ = false;
+        flow_step_script_.clear();
+        if (rpc_ && rpc_->isConnected()) {
+            rpc_->call(Protocol::Methods::ARM_STOP, QJsonObject{}, nullptr);
+        }
     } else {
+        // (legacy proc_battery_swap 路径,留着以备将来回切)
         swap_poll_timer_->stop();
         rpc_->call("swap.cancel", QJsonObject{}, nullptr);
     }
@@ -1191,11 +1269,26 @@ void Tab4TaskConfig::onFlowStepAdvance()
                           ? flow_step_script_.size()
                           : flow_step_states_to_run_.size();
     if (flow_step_run_idx_ < 0 || flow_step_run_idx_ >= total) {
-        // Done — mark last as Done, reset state.
-        if (!flow_step_states_to_run_.isEmpty()) {
-            flow_widget_->markFinished(flow_step_states_to_run_.last());
+        // 当前 stage 的脚本跑完 — 把它的所有 fine-state 标 Done
+        for (const QString &sid : flow_step_states_to_run_) {
+            flow_widget_->markFinished(sid);
         }
         if (step_advance_timer_) step_advance_timer_->stop();
+        appendLog("info", QString("✓ 步骤完成: %1").arg(flow_step_selected_stage_));
+
+        // 实机模式: 自动跳到下一个 stage. 单步模式: 收摊.
+        if (flow_real_sequential_) {
+            const int next = flow_real_stage_idx_ + 1;
+            flow_step_run_idx_ = -1;
+            flow_step_use_script_ = false;
+            flow_step_script_.clear();
+            if (startRealStage(next)) {
+                return;   // startRealStage 已经把下一个 stage 的第一步打出去 + timer 启了
+            }
+            // 全部跑完, startRealStage 已经收尾
+            return;
+        }
+
         flow_step_run_idx_ = -1;
         flow_step_use_script_ = false;
         flow_step_script_.clear();
@@ -1203,7 +1296,6 @@ void Tab4TaskConfig::onFlowStepAdvance()
         btn_flow_stop_->setText("⏭ 跳过(标完成)");
         flow_status_label_->setText(
             QString("✓ 步骤 %1 执行完成").arg(flow_step_selected_stage_));
-        appendLog("info", QString("✓ 步骤完成: %1").arg(flow_step_selected_stage_));
         return;
     }
 

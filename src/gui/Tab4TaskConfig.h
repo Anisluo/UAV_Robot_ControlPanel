@@ -83,6 +83,10 @@ private:
     // right RPC by step type and setting step_advance_timer_'s interval
     // to match the step's expected duration.
     void dispatchScriptStep(const struct TaskStep &step);
+    // 实机模式: 把当前 flow_real_stage_idx_ 指向的 stage 的脚本装进
+    // flow_step_script_ / flow_step_states_to_run_, 然后用单步那套 timer 跑.
+    // 返回 true 成功开跑, false 表示已经走到 9 个 stage 末尾.
+    bool startRealStage(int stage_idx);
     // Poll airport.get_status; advance script step when all watched
     // rails reach the wait condition. session_run_idx captures
     // flow_step_run_idx_ at dispatch time so stale callbacks from a
@@ -152,6 +156,13 @@ private:
     QString         flow_step_selected_stage_;     // 当前选中的"步骤" (stage_id)
     QVector<QString> flow_step_states_to_run_;     // 选中 stage 下所有 state_id, 顺序
     int              flow_step_run_idx_ = -1;      // 当前执行到第几个 (在 to_run_ 或 script 里的索引)
+
+    // 实机模式 (串行跑全部 9 个 stage). 单步是 "选中一个 stage 跑它的脚本",
+    // 实机就是 "stage 1..9 一个接一个全跑完", 复用同一套 dispatchScriptStep
+    // + step_advance_timer 机制. flow_real_sequential_ = true 时, 当前 stage
+    // 的脚本跑完后, onFlowStepAdvance 自动加载下一个 stage 而不是收摊。
+    bool             flow_real_sequential_  = false;
+    int              flow_real_stage_idx_   = -1;   // 当前跑第几个 stage (0..8)
     QVector<float>   flow_step_prev_joints_;       // last commanded joints, for dynamic step_ms calc
     // When the selected stage has a recorded script in stage_scripts_,
     // single-step mode walks THE SCRIPT (every type — MOVE_JOINTS,
