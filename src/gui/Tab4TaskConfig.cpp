@@ -661,6 +661,56 @@ void Tab4TaskConfig::onFlowModeChanged()
     }
 }
 
+// Poll airport.get_status until every rail in `watched_rails` reports
+// STALLED (state == 2). When that happens, stop the step-advance timer
+// and trigger the next step immediately — saves the operator from
+// waiting out the max_ms upper bound.
+//
+// Re-arms itself with a 200 ms singleShot until: (a) all watched rails
+// stalled → manual advance; or (b) flow_step_run_idx_ changed → stale,
+// drop silently; or (c) max_ms timeout fired the timer anyway → also
+// stale-drop.
+void Tab4TaskConfig::pollAirportStall(const QVector<int> &watched_rails,
+                                       const QString &label,
+                                       int session_run_idx)
+{
+    if (flow_step_run_idx_ != session_run_idx) return;
+    if (!rpc_ || !rpc_->isConnected()) return;
+    rpc_->call(Protocol::Methods::AIRPORT_GET_STATUS, QJsonObject{},
+        [this, watched_rails, label, session_run_idx](QJsonObject reply) {
+            if (flow_step_run_idx_ != session_run_idx) return;
+            const QJsonArray rails = reply.value("rails").toArray();
+            // Map rail index → state for quick lookup.
+            int state[3] = {0, 0, 0};
+            for (const QJsonValue &v : rails) {
+                const QJsonObject o = v.toObject();
+                const int idx = o.value("index").toInt(-1);
+                if (idx >= 0 && idx < 3) state[idx] = o.value("state").toInt(0);
+            }
+            bool all_stalled = !watched_rails.isEmpty();
+            for (int r : watched_rails) {
+                if (r < 0 || r >= 3 || state[r] != 2 /*STALLED*/) {
+                    all_stalled = false; break;
+                }
+            }
+            if (all_stalled) {
+                appendLog("info",
+                    QString("✓ %1 已堵转, 提前推进").arg(label));
+                if (step_advance_timer_ && step_advance_timer_->isActive()) {
+                    step_advance_timer_->stop();
+                }
+                onFlowStepAdvance();
+                return;
+            }
+            // Not yet — schedule next poll. 200 ms ≈ 1.5× the gateway
+            // monitor's confirm_hits cadence so we don't hammer.
+            QTimer::singleShot(200, this,
+                [this, watched_rails, label, session_run_idx]() {
+                    pollAirportStall(watched_rails, label, session_run_idx);
+                });
+        });
+}
+
 // Build the sim playlist: walk each stage in pipeline order; for each
 // stage, expand into either (a) the configured TaskStep script's steps
 // if one was recorded, or (b) the stage's fine-grained demo states as
@@ -1373,21 +1423,21 @@ void Tab4TaskConfig::dispatchScriptStep(const TaskStep &step)
             const QString action = step.params.value("action", "lock").toString();
             const int speed_rpm  = step.params.value("speed_rpm", 1500).toInt();
             const int max_ms     = std::max(500, step.params.value("max_ms", 7000).toInt());
-            // STOP → 300 ms → SPEED — same pre-empt the dashboard AirportWidget
-            // uses (commit 245079f). Pre-clears any latched stall protection
-            // from the previous step before issuing the new motion command,
-            // so 前进 → 堵转 → 后退 sequences inside a stage script don't get
-            // stuck the way the manual buttons used to.
+            // STOP → 300 ms → SPEED — pre-clears any latched stall state.
             constexpr int kStallSettleMs = 300;
             QString name;
             QString method;
             QJsonObject params;
             QJsonObject stop_params;
             QString stop_method = Protocol::Methods::AIRPORT_STOP_ALL;
+            // Which backend rail indices does this action drive? Used by the
+            // status poll loop to know which rails to wait for STALLED on.
+            QVector<int> watched_rails;
             if (action == "release") {
                 method = Protocol::Methods::AIRPORT_RELEASE;
                 params[Protocol::Fields::SPEED_RPM] = speed_rpm;
                 name = "释放(1+3)";
+                watched_rails = {0, 2};
             } else if (action == "rail2_fwd" || action == "rail2_back") {
                 method = Protocol::Methods::AIRPORT_SET_SPEED;
                 params[Protocol::Fields::RAIL]      = 1;          // backend idx 1 = UI rail 2
@@ -1396,22 +1446,36 @@ void Tab4TaskConfig::dispatchScriptStep(const TaskStep &step)
                 stop_method = Protocol::Methods::AIRPORT_STOP;
                 stop_params[Protocol::Fields::RAIL] = 1;
                 name = (action == "rail2_fwd") ? "导轨2 前进" : "导轨2 后退";
+                watched_rails = {1};
             } else {
                 method = Protocol::Methods::AIRPORT_LOCK;
                 params[Protocol::Fields::SPEED_RPM] = speed_rpm;
                 name = "锁定(1+3)";
+                watched_rails = {0, 2};
             }
             rpc_->call(stop_method, stop_params);
             QTimer::singleShot(kStallSettleMs, this,
                 [this, method, params, cb_log_err]() {
                     if (rpc_) rpc_->call(method, params, cb_log_err);
                 });
-            // Hand the orchestrator a duration that absorbs the 300 ms pre-stop
-            // PLUS the user's configured max_ms motion budget. Without this
-            // the timer would expire before the SPEED fires.
-            duration_ms = max_ms + kStallSettleMs;
+            duration_ms = max_ms + kStallSettleMs;   // safety upper bound
+
+            // Stall-aware advance: poll airport.get_status every 200 ms. The
+            // moment ALL watched rails report STALLED (state == 2), advance
+            // the script step instantly — don't make the operator wait out
+            // the max_ms budget. This is what "must wait for stall before
+            // closing the gripper" means in their flow.
+            // Poll starts AFTER the 300 ms settle so we don't observe the
+            // pre-stop's transient STALLED→IDLE flicker.
+            const int session_run_idx = flow_step_run_idx_;
+            QTimer::singleShot(kStallSettleMs + 100, this,
+                [this, watched_rails, name, session_run_idx]() {
+                    if (flow_step_run_idx_ != session_run_idx) return;
+                    pollAirportStall(watched_rails, name, session_run_idx);
+                });
+
             appendLog("info",
-                QString("▶ [%1/%2] AIRPORT_RAIL %3 @ %4rpm  急停 %6ms + 最长 %5ms (堵转自动停)%7")
+                QString("▶ [%1/%2] AIRPORT_RAIL %3 @ %4rpm  急停 %6ms + 最长 %5ms (检测堵转推进)%7")
                     .arg(step_num).arg(total).arg(name)
                     .arg(speed_rpm).arg(max_ms).arg(kStallSettleMs).arg(note));
             break;

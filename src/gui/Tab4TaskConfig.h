@@ -83,6 +83,13 @@ private:
     // right RPC by step type and setting step_advance_timer_'s interval
     // to match the step's expected duration.
     void dispatchScriptStep(const struct TaskStep &step);
+    // Poll airport.get_status; when all `watched_rails` report STALLED
+    // (state == 2), stop step_advance_timer_ and advance the script step
+    // immediately. `session_run_idx` captures flow_step_run_idx_ at
+    // dispatch time so stale poll callbacks from a previous step don't
+    // mis-advance a later one.
+    void pollAirportStall(const QVector<int> &watched_rails,
+                          const QString &label, int session_run_idx);
     struct SimSegment;
     QVector<SimSegment> buildSimPlaylist() const;
     QWidget* build3DViewer();

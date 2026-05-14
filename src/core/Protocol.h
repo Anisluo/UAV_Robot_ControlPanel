@@ -45,6 +45,7 @@ namespace Methods {
     constexpr const char* AIRPORT_RELEASE    = "airport.release";
     constexpr const char* AIRPORT_STOP_ALL   = "airport.stop_all";
     constexpr const char* AIRPORT_GRIPPER    = "airport.gripper";
+    constexpr const char* AIRPORT_GET_STATUS = "airport.get_status";   // per-rail state poll
     constexpr const char* ARM_GRIPPER_SET    = "arm_gripper.set";
     constexpr const char* CAMERA_SET_PROFILE = "camera.set_profile";
     constexpr const char* CAMERA_SET_EXPOSURE= "camera.set_exposure";
