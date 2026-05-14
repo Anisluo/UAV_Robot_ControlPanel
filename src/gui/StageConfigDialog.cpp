@@ -138,8 +138,17 @@ void StageConfigDialog::buildUi()
 
     body->addLayout(right, /*stretch=*/3);
 
-    // ── Bottom: 执行 (current step) + 保存 / 取消 ───────────────────
+    // ── Bottom: 保存 / 取消 + 执行 (all on the right) ──────────────
     auto *bottom_row = new QHBoxLayout;
+    bottom_row->addStretch(1);
+
+    auto *btns = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel, this);
+    btns->button(QDialogButtonBox::Save)->setText(QStringLiteral("保存"));
+    btns->button(QDialogButtonBox::Cancel)->setText(QStringLiteral("取消"));
+    connect(btns, &QDialogButtonBox::accepted, this, &QDialog::accept);
+    connect(btns, &QDialogButtonBox::rejected, this, &QDialog::reject);
+    bottom_row->addWidget(btns);
+
     btn_execute_ = new QPushButton(QStringLiteral("▶ 执行"), this);
     btn_execute_->setToolTip(QStringLiteral("用当前编辑器里的参数, 立即在真机上执行选中的步骤"));
     btn_execute_->setStyleSheet(
@@ -151,14 +160,7 @@ void StageConfigDialog::buildUi()
     connect(btn_execute_, &QPushButton::clicked,
             this, &StageConfigDialog::onExecuteCurrentStep);
     bottom_row->addWidget(btn_execute_);
-    bottom_row->addStretch(1);
 
-    auto *btns = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel, this);
-    btns->button(QDialogButtonBox::Save)->setText(QStringLiteral("保存"));
-    btns->button(QDialogButtonBox::Cancel)->setText(QStringLiteral("取消"));
-    connect(btns, &QDialogButtonBox::accepted, this, &QDialog::accept);
-    connect(btns, &QDialogButtonBox::rejected, this, &QDialog::reject);
-    bottom_row->addWidget(btns);
     root->addLayout(bottom_row);
 }
 
