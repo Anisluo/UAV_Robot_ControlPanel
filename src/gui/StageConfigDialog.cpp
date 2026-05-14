@@ -176,7 +176,40 @@ void StageConfigDialog::buildEditPanels()
         connect(mj_speed_, QOverload<int>::of(&QSpinBox::valueChanged),
                 this, &StageConfigDialog::onParamChanged);
         grid->addWidget(mj_speed_, 6, 1);
-        grid->setRowStretch(7, 1);
+
+        // ▶ 运动到该点 — fire arm.move_joints with the configured angles
+        // so the operator can preview-test the pose before saving. Same
+        // RPC the script orchestrator uses, so behavior matches what you'd
+        // get when this step actually runs.
+        auto *btn_goto = new QPushButton(QStringLiteral("▶ 运动到该点"), w);
+        btn_goto->setStyleSheet(
+            "QPushButton{ background:#3a8; color:white; font-weight:bold;"
+            " padding:4px 14px; border-radius:4px; }"
+            "QPushButton:hover{ background:#4ba; }"
+            "QPushButton:disabled{ background:#446; color:#aab; }");
+        connect(btn_goto, &QPushButton::clicked, this, [this, btn_goto]() {
+            if (!rpc_ || !rpc_->isConnected()) {
+                QMessageBox::warning(this, "RPC", "未连接到 RK3588, 无法执行");
+                return;
+            }
+            QJsonArray j;
+            for (int i = 0; i < 6; ++i) j.append(mj_j_[i]->value());
+            QJsonObject p;
+            p["joints"]      = j;
+            p["speed_ratio"] = mj_speed_->value() / 100.0;
+            btn_goto->setEnabled(false);
+            rpc_->call(QStringLiteral("arm.move_joints"), p,
+                [btn_goto](QJsonObject /*reply*/) {
+                    // re-enable after backend responds; UI thread, safe
+                    btn_goto->setEnabled(true);
+                });
+            // Hard re-enable after 8s in case the RPC reply never arrives
+            QTimer::singleShot(8000, btn_goto,
+                [btn_goto]() { btn_goto->setEnabled(true); });
+        });
+        grid->addWidget(btn_goto, 7, 0, 1, 3);
+
+        grid->setRowStretch(8, 1);
         editor_stack_->insertWidget(int(StepType::MOVE_JOINTS), w);
     }
 
