@@ -66,6 +66,8 @@ private slots:
     void onFlowStart();
     void onFlowStop();
     void onFlowReset();
+    void onFlowExport();              // 整套 9 stage 任务脚本另存为 JSON
+    void onFlowImport();              // 从 JSON 加载, 替换当前脚本
     void onFlowSimTick();             // 30 Hz interpolation when sim is running
     void onSwapStatusPoll();          // 2 Hz polling in real mode
     void onFlowStationClicked(QString state_id);
@@ -174,6 +176,8 @@ private:
     QPushButton    *btn_flow_start_   = nullptr;
     QPushButton    *btn_flow_stop_    = nullptr;
     QPushButton    *btn_flow_reset_   = nullptr;
+    QPushButton    *btn_flow_export_  = nullptr;   // 导出全部 9 stage 脚本到 JSON
+    QPushButton    *btn_flow_import_  = nullptr;   // 加载 JSON 替换当前脚本
     QLabel         *flow_status_label_= nullptr;
 
     // Flow simulator (sim mode) — walks a precomputed playlist.

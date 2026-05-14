@@ -10,6 +10,8 @@
 
 #include <QRadioButton>
 #include <QButtonGroup>
+#include <QFileDialog>
+#include <QFileInfo>
 #include <QMessageBox>
 
 #include <QVBoxLayout>
@@ -389,6 +391,21 @@ QWidget* Tab4TaskConfig::buildTaskPanel()
     bar->addWidget(btn_flow_stop_);
     bar->addWidget(btn_flow_reset_);
     bar->addSpacing(10);
+
+    btn_flow_export_ = new QPushButton(QStringLiteral("💾 导出"), grp);
+    btn_flow_import_ = new QPushButton(QStringLiteral("📂 加载"), grp);
+    btn_flow_export_->setToolTip(QStringLiteral("把当前 9 个 stage 的录制脚本导出到 JSON 文件"));
+    btn_flow_import_->setToolTip(QStringLiteral("从 JSON 文件加载任务脚本, 覆盖当前所有 stage"));
+    btn_flow_export_->setFixedHeight(32);
+    btn_flow_import_->setFixedHeight(32);
+    btn_flow_export_->setStyleSheet("QPushButton{ background:#445; color:#ddd; padding:4px 10px; border-radius:4px; }"
+                                     "QPushButton:hover{ background:#556; }");
+    btn_flow_import_->setStyleSheet("QPushButton{ background:#445; color:#ddd; padding:4px 10px; border-radius:4px; }"
+                                     "QPushButton:hover{ background:#556; }");
+    bar->addWidget(btn_flow_export_);
+    bar->addWidget(btn_flow_import_);
+    bar->addSpacing(10);
+
     bar->addWidget(btn_estop_);
     bar->addStretch(1);
 
@@ -420,6 +437,8 @@ QWidget* Tab4TaskConfig::buildTaskPanel()
     connect(btn_flow_start_, &QPushButton::clicked,   this, &Tab4TaskConfig::onFlowStart);
     connect(btn_flow_stop_,  &QPushButton::clicked,   this, &Tab4TaskConfig::onFlowStop);
     connect(btn_flow_reset_, &QPushButton::clicked,   this, &Tab4TaskConfig::onFlowReset);
+    connect(btn_flow_export_,&QPushButton::clicked,   this, &Tab4TaskConfig::onFlowExport);
+    connect(btn_flow_import_,&QPushButton::clicked,   this, &Tab4TaskConfig::onFlowImport);
     connect(btn_estop_,      &QPushButton::clicked,   this, &Tab4TaskConfig::onEstopTask);
     connect(flow_widget_,    &TaskFlowWidget::stationClicked,
             this,            &Tab4TaskConfig::onFlowStationClicked);
@@ -1042,6 +1061,101 @@ void Tab4TaskConfig::onFlowReset()
     sim_playlist_.clear();
     flow_status_label_->setText(QString("就绪 · 模式: %1")
                                    .arg(mode_sim_radio_->isChecked() ? "模拟" : "实机"));
+}
+
+// 导出: 把当前的 9-stage 脚本 bundle 写到操作员选的 JSON 文件
+void Tab4TaskConfig::onFlowExport()
+{
+    if (flow_running_) {
+        QMessageBox::warning(this, QStringLiteral("运行中"),
+                              QStringLiteral("流程运行中, 请先停止再导出"));
+        return;
+    }
+    const QString default_name =
+        QStringLiteral("task_%1.json")
+            .arg(QDateTime::currentDateTime().toString("yyyyMMdd_HHmmss"));
+    const QString path = QFileDialog::getSaveFileName(
+        this, QStringLiteral("导出任务配置"),
+        QDir::homePath() + "/" + default_name,
+        QStringLiteral("Task JSON (*.json)"));
+    if (path.isEmpty()) return;
+
+    TaskConfig cfg;
+    cfg.scripts = stage_scripts_;
+    QFile f(path);
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        QMessageBox::warning(this, QStringLiteral("导出失败"),
+            QStringLiteral("写入 %1 失败: %2").arg(path, f.errorString()));
+        return;
+    }
+    f.write(QJsonDocument(cfg.toJson()).toJson(QJsonDocument::Indented));
+    f.close();
+
+    int total_steps = 0;
+    for (const auto &v : stage_scripts_) total_steps += v.size();
+    appendLog("info",
+        QString("[stages] ✓ 导出 %1 stage / %2 步 → %3")
+            .arg(stage_scripts_.size()).arg(total_steps).arg(path));
+    flow_status_label_->setText(
+        QString("已导出: %1").arg(QFileInfo(path).fileName()));
+}
+
+// 加载: 从操作员选的 JSON 替换全部 stage 脚本
+void Tab4TaskConfig::onFlowImport()
+{
+    if (flow_running_) {
+        QMessageBox::warning(this, QStringLiteral("运行中"),
+                              QStringLiteral("流程运行中, 请先停止再加载"));
+        return;
+    }
+    const QString path = QFileDialog::getOpenFileName(
+        this, QStringLiteral("加载任务配置"), QDir::homePath(),
+        QStringLiteral("Task JSON (*.json)"));
+    if (path.isEmpty()) return;
+
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly)) {
+        QMessageBox::warning(this, QStringLiteral("加载失败"),
+            QStringLiteral("打开 %1 失败: %2").arg(path, f.errorString()));
+        return;
+    }
+    QJsonParseError err{};
+    const auto doc = QJsonDocument::fromJson(f.readAll(), &err);
+    f.close();
+    if (err.error != QJsonParseError::NoError || !doc.isObject()) {
+        QMessageBox::warning(this, QStringLiteral("加载失败"),
+            QStringLiteral("JSON 解析错误: %1").arg(err.errorString()));
+        return;
+    }
+    const TaskConfig cfg = TaskConfig::fromJson(doc.object());
+    if (cfg.scripts.isEmpty()) {
+        const auto reply = QMessageBox::question(this, QStringLiteral("空配置"),
+            QStringLiteral("此 JSON 不含任何 stage 脚本, 仍要应用 (清空当前所有脚本)?"));
+        if (reply != QMessageBox::Yes) return;
+    } else {
+        int total_steps = 0;
+        for (const auto &v : cfg.scripts) total_steps += v.size();
+        const auto reply = QMessageBox::question(this, QStringLiteral("确认加载"),
+            QStringLiteral("从 %1 加载 %2 个 stage / %3 步, 覆盖当前配置?")
+                .arg(QFileInfo(path).fileName())
+                .arg(cfg.scripts.size())
+                .arg(total_steps));
+        if (reply != QMessageBox::Yes) return;
+    }
+    stage_scripts_ = cfg.scripts;
+
+    // 顺便落盘到 home 配置, 下次启动也用这份
+    TaskConfig persisted;
+    persisted.scripts = stage_scripts_;
+    persisted.saveToHomeFile();
+
+    int total_steps = 0;
+    for (const auto &v : stage_scripts_) total_steps += v.size();
+    appendLog("info",
+        QString("[stages] ✓ 加载 %1 stage / %2 步 ← %3")
+            .arg(stage_scripts_.size()).arg(total_steps).arg(path));
+    flow_status_label_->setText(
+        QString("已加载: %1").arg(QFileInfo(path).fileName()));
 }
 
 void Tab4TaskConfig::onFlowSimTick()
