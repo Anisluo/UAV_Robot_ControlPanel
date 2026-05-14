@@ -93,9 +93,10 @@ void StageConfigDialog::buildUi()
     btn_row->addWidget(btn_dn_);
     left->addLayout(btn_row);
 
-    btn_record_ = new QPushButton(QStringLiteral("📍 录入当前关节为新点"), this);
-    btn_record_->setToolTip(QStringLiteral("拖动机械臂到位置后点击, "
-                                          "把当前 6 关节角度作为新 MOVE_JOINTS 步追加到列表末尾"));
+    btn_record_ = new QPushButton(QStringLiteral("📍 录入当前关节为当前节点"), this);
+    btn_record_->setToolTip(QStringLiteral("先在左边选中要修改的 \"机械臂关节\" 步骤, "
+                                          "拖动机械臂到位置后点击, "
+                                          "把当前 6 关节角度覆盖到选中的那一步上"));
     btn_record_->setStyleSheet("QPushButton{ background:#3a8; color:white; font-weight:bold; padding:6px;}"
                               "QPushButton:hover{ background:#4ab;}"
                               "QPushButton:disabled{ background:#446; color:#aab;}");
@@ -1027,6 +1028,11 @@ void StageConfigDialog::onExecuteCurrentStep()
 // ════════════════════════════════════════════════════════════════════════
 // Record current joints (calls arm.get_angles over RPC)
 // ════════════════════════════════════════════════════════════════════════
+// "录入当前关节为当前节点" — overwrites the currently selected MOVE_JOINTS
+// step's joint values with the live arm pose. Used to fine-tune a recorded
+// waypoint: select the row, drag the arm to the desired physical position,
+// click this button, and the row updates in-place. Refuses if no row is
+// selected, or the selected row isn't a MOVE_JOINTS step.
 void StageConfigDialog::onRecordCurrentJoints()
 {
     if (!rpc_ || !rpc_->isConnected()) {
@@ -1034,22 +1040,34 @@ void StageConfigDialog::onRecordCurrentJoints()
                               QStringLiteral("RPC 未连接, 请先连接到 RK3588"));
         return;
     }
+    if (cur_row_ < 0 || cur_row_ >= steps_.size()) {
+        QMessageBox::warning(this, QStringLiteral("录点失败"),
+                              QStringLiteral("请先在左侧选中一条机械臂关节步骤"));
+        return;
+    }
+    if (steps_[cur_row_].type != StepType::MOVE_JOINTS) {
+        QMessageBox::warning(this, QStringLiteral("录点失败"),
+            QStringLiteral("当前选中的不是 \"机械臂关节\" 步骤, 改不了"));
+        return;
+    }
+    const int target_row = cur_row_;
     rpc_->call(Protocol::Methods::ARM_GET_ANGLES, QJsonObject{},
-        [this](QJsonObject reply) {
+        [this, target_row](QJsonObject reply) {
+            // Bail if user changed selection during the round-trip
+            if (target_row < 0 || target_row >= steps_.size()) return;
+            if (steps_[target_row].type != StepType::MOVE_JOINTS) return;
             const auto arr = reply.value(Protocol::Fields::ANGLES).toArray();
             if (arr.size() != 6) {
                 QMessageBox::warning(this, QStringLiteral("录点失败"),
-                                      QStringLiteral("arm.get_angles 返回非 6 元素"));
+                    QStringLiteral("arm.get_angles 返回非 6 元素"));
                 return;
             }
-            TaskStep s;
-            s.type = StepType::MOVE_JOINTS;
             QVariantList j;
             for (const auto &v : arr) j << v.toDouble();
-            s.params["joints"]      = j;
-            s.params["speed_ratio"] = 0.30;
-            steps_.append(s);
+            steps_[target_row].params["joints"] = j;
+            // speed_ratio 不动 — 操作员事先设的速度保留
             refreshList();
-            list_->setCurrentRow(steps_.size() - 1);
+            list_->setCurrentRow(target_row);
+            showRow(target_row);   // refresh the editor spinboxes from new data
         });
 }
