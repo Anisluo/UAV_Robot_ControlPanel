@@ -26,6 +26,7 @@
 #include <QSettings>
 #include <QJsonArray>
 #include <QJsonObject>
+#include <QTimer>
 #include <QJsonValue>
 #include <QFrame>
 #include <QStringList>
@@ -292,6 +293,45 @@ void PiperWidget::buildCartesianTab() {
 
     send_cart_btn_ = new QPushButton("发送目标位姿", tab);
     btn_row->addWidget(send_cart_btn_);
+
+    // 🎯 定点测试 — TCP 钉在当前 (X,Y,Z), RY 来回扫 ±15°, 看关节
+    // 重新分配但 TCP 点不动. 没数据时先 "读取当前位姿".
+    auto *fix_btn = new QPushButton(QStringLiteral("🎯 定点测试"), tab);
+    fix_btn->setToolTip(
+        QStringLiteral("TCP 锁在上面的 (X,Y,Z), RY 在 ±15° 之间来回扫 4 次.\n"
+                       "观察关节角度在变但 TCP 锁定 — Cartesian 控制正常的信号."));
+    fix_btn->setStyleSheet(
+        "QPushButton{ background:#357ec7; color:white; font-weight:bold;"
+        " padding:4px 12px; border-radius:4px; }"
+        "QPushButton:hover{ background:#4689d8; }"
+        "QPushButton:disabled{ background:#446; color:#aab; }");
+    connect(fix_btn, &QPushButton::clicked, this, [this, fix_btn]() {
+        if (!rpc_) return;
+        const double x  = cart_spins_[0]->value();
+        const double y  = cart_spins_[1]->value();
+        const double z  = cart_spins_[2]->value();
+        const double rx = cart_spins_[3]->value();
+        const double ry0 = cart_spins_[4]->value();
+        const double rz = cart_spins_[5]->value();
+        const QVector<double> ry_seq = { ry0 + 15.0, ry0 - 15.0,
+                                          ry0 + 15.0, ry0 };
+        constexpr int kStepMs = 1200;
+        fix_btn->setEnabled(false);
+        for (int i = 0; i < ry_seq.size(); ++i) {
+            QTimer::singleShot(i * kStepMs, this,
+                [this, x, y, z, rx, ry = ry_seq[i], rz]() {
+                    if (!rpc_) return;
+                    QJsonObject p;
+                    p["x_mm"]      = x;  p["y_mm"]      = y;  p["z_mm"]      = z;
+                    p["roll_deg"]  = rx; p["pitch_deg"] = ry; p["yaw_deg"]   = rz;
+                    rpc_->call(QStringLiteral("piper.move_cartesian"), p, nullptr);
+                });
+        }
+        QTimer::singleShot(ry_seq.size() * kStepMs + 500, fix_btn,
+            [fix_btn]() { fix_btn->setEnabled(true); });
+    });
+    btn_row->addWidget(fix_btn);
+
     btn_row->addStretch(1);
     vbox->addLayout(btn_row);
 
