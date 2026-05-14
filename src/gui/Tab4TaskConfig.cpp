@@ -1373,31 +1373,47 @@ void Tab4TaskConfig::dispatchScriptStep(const TaskStep &step)
             const QString action = step.params.value("action", "lock").toString();
             const int speed_rpm  = step.params.value("speed_rpm", 1500).toInt();
             const int max_ms     = std::max(500, step.params.value("max_ms", 7000).toInt());
+            // STOP → 300 ms → SPEED — same pre-empt the dashboard AirportWidget
+            // uses (commit 245079f). Pre-clears any latched stall protection
+            // from the previous step before issuing the new motion command,
+            // so 前进 → 堵转 → 后退 sequences inside a stage script don't get
+            // stuck the way the manual buttons used to.
+            constexpr int kStallSettleMs = 300;
             QString name;
+            QString method;
+            QJsonObject params;
+            QJsonObject stop_params;
+            QString stop_method = Protocol::Methods::AIRPORT_STOP_ALL;
             if (action == "release") {
-                QJsonObject p;
-                p[Protocol::Fields::SPEED_RPM] = speed_rpm;
-                rpc_->call(Protocol::Methods::AIRPORT_RELEASE, p, cb_log_err);
+                method = Protocol::Methods::AIRPORT_RELEASE;
+                params[Protocol::Fields::SPEED_RPM] = speed_rpm;
                 name = "释放(1+3)";
             } else if (action == "rail2_fwd" || action == "rail2_back") {
-                QJsonObject p;
-                p[Protocol::Fields::RAIL]      = 1;          // backend index 1 = UI rail 2
-                p[Protocol::Fields::SPEED_RPM] =
+                method = Protocol::Methods::AIRPORT_SET_SPEED;
+                params[Protocol::Fields::RAIL]      = 1;          // backend idx 1 = UI rail 2
+                params[Protocol::Fields::SPEED_RPM] =
                     (action == "rail2_fwd") ? speed_rpm : -speed_rpm;
-                rpc_->call(Protocol::Methods::AIRPORT_SET_SPEED, p, cb_log_err);
+                stop_method = Protocol::Methods::AIRPORT_STOP;
+                stop_params[Protocol::Fields::RAIL] = 1;
                 name = (action == "rail2_fwd") ? "导轨2 前进" : "导轨2 后退";
             } else {
-                // default "lock"
-                QJsonObject p;
-                p[Protocol::Fields::SPEED_RPM] = speed_rpm;
-                rpc_->call(Protocol::Methods::AIRPORT_LOCK, p, cb_log_err);
+                method = Protocol::Methods::AIRPORT_LOCK;
+                params[Protocol::Fields::SPEED_RPM] = speed_rpm;
                 name = "锁定(1+3)";
             }
-            duration_ms = max_ms;
+            rpc_->call(stop_method, stop_params);
+            QTimer::singleShot(kStallSettleMs, this,
+                [this, method, params, cb_log_err]() {
+                    if (rpc_) rpc_->call(method, params, cb_log_err);
+                });
+            // Hand the orchestrator a duration that absorbs the 300 ms pre-stop
+            // PLUS the user's configured max_ms motion budget. Without this
+            // the timer would expire before the SPEED fires.
+            duration_ms = max_ms + kStallSettleMs;
             appendLog("info",
-                QString("▶ [%1/%2] AIRPORT_RAIL %3 @ %4rpm  最长 %5ms (堵转自动停)%6")
+                QString("▶ [%1/%2] AIRPORT_RAIL %3 @ %4rpm  急停 %6ms + 最长 %5ms (堵转自动停)%7")
                     .arg(step_num).arg(total).arg(name)
-                    .arg(speed_rpm).arg(max_ms).arg(note));
+                    .arg(speed_rpm).arg(max_ms).arg(kStallSettleMs).arg(note));
             break;
         }
         case StepType::MOVE_CARTESIAN:
