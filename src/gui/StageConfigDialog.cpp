@@ -572,6 +572,20 @@ void StageConfigDialog::showRow(int row)
             gr_force_->setValue(s.params.value("force_pct").toInt());
             break;
         case StepType::AIRPORT_RAIL: {
+            // CRITICAL: per-widget signal block. The parent-widget
+            // blockSignals(true) in the outer loop doesn't propagate to
+            // children, so each setCurrentIndex/setValue below would
+            // otherwise fire valueChanged → onParamChanged → readEditorsTo,
+            // which writes the *current* editor state to steps_[cur_row_]
+            // — including stale values from a previously-viewed step. End
+            // result: opening a step occasionally clobbers its saved
+            // stop_mode with whatever the previously-visible step had.
+            const QSignalBlocker b_action  (ar_action_);
+            const QSignalBlocker b_mode    (ar_stop_mode_);
+            const QSignalBlocker b_speed   (ar_speed_);
+            const QSignalBlocker b_dist    (ar_distance_);
+            const QSignalBlocker b_max_ms  (ar_max_ms_);
+
             const QString action = s.params.value("action", "lock").toString();
             int aidx = ar_action_->findData(action);
             if (aidx < 0) aidx = 0;
@@ -586,8 +600,8 @@ void StageConfigDialog::showRow(int row)
             ar_distance_->setValue(s.params.value("distance_mm", 50.0).toDouble());
             ar_max_ms_->setValue(s.params.value("max_ms", 7000).toInt());
 
-            // Re-apply row visibility after setCurrentIndex (signal blocked
-            // during showRow so the lambda above didn't fire).
+            // Re-apply row visibility (the lambda hooked to ar_stop_mode_'s
+            // currentIndexChanged is blocked by the QSignalBlocker above).
             if (auto *form = qobject_cast<QFormLayout*>(ar_distance_->parentWidget()->layout())) {
                 form->setRowVisible(ar_distance_, stop_mode == "distance");
             }
