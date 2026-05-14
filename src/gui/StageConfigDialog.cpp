@@ -18,6 +18,8 @@
 #include <QLineEdit>
 #include <QDialogButtonBox>
 #include <QGroupBox>
+#include <QAbstractSpinBox>
+#include <QApplication>
 #include <QMessageBox>
 #include <QTimer>
 #include <QJsonArray>
@@ -146,7 +148,24 @@ void StageConfigDialog::buildUi()
     auto *btns = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel, this);
     btns->button(QDialogButtonBox::Save)->setText(QStringLiteral("保存"));
     btns->button(QDialogButtonBox::Cancel)->setText(QStringLiteral("取消"));
-    connect(btns, &QDialogButtonBox::accepted, this, &QDialog::accept);
+    // CRITICAL: before accepting we have to commit any pending spinbox /
+    // line-edit. Qt's QSpinBox::value() returns the last *committed* value,
+    // NOT what's currently displayed if the user typed but didn't tab/Enter.
+    // Without this, "change force_pct 30 → 50, click 保存" saved 30 because
+    // the in-progress edit hadn't been interpreted yet.
+    connect(btns, &QDialogButtonBox::accepted, this, [this]() {
+        // 1. Force the active edit-in-progress widget to commit.
+        if (auto *fw = QApplication::focusWidget()) {
+            if (auto *sb = qobject_cast<QAbstractSpinBox*>(fw)) sb->interpretText();
+            fw->clearFocus();   // triggers editingFinished on every editor
+        }
+        // 2. Flush editor fields → steps_[cur_row_] one more time after
+        //    any deferred valueChanged signals fire.
+        if (cur_row_ >= 0 && cur_row_ < steps_.size()) {
+            readEditorsTo(steps_[cur_row_]);
+        }
+        accept();
+    });
     connect(btns, &QDialogButtonBox::rejected, this, &QDialog::reject);
     bottom_row->addWidget(btns);
 
