@@ -1458,14 +1458,17 @@ void Tab4TaskConfig::dispatchScriptStep(const TaskStep &step)
             rpc_->call(stop_method, stop_params);
 
             // Compute the motion time for distance mode using the existing
-            // set_speed RPC + a STOP timer. Formula matches the empirically-
-            // verified 50 mm/s at 1500 rpm (ZDT Emm V5.0, 200 microsteps/rev,
-            // pulses_per_mm=100): mm/s = rpm / 30, so time_ms = mm*30000/rpm.
-            // This works today without redeploying proc_gateway. If the
-            // operator's hardware differs (different microstep or screw lead),
-            // they can adjust speed_rpm to compensate.
+            // set_speed RPC + a STOP timer. Formula derived from empirical
+            // calibration on the airport gripper rail (rail 2):
+            //   5s @ 1500rpm → 25 mm  ⇒  5 mm/s @ 1500 rpm
+            //   ⇒ mm/s = rpm / 300,  time_ms = mm × 300000 / rpm
+            // (Factor of 300 — not the 30 you'd expect from a 1mm screw lead
+            //  alone — reflects this rail's microstep × command-scaling
+            //  combination on the ZDT driver. Bump rpm to halve the time.)
+            // 100mm @ 1500rpm → 20s. Works today without redeploying
+            // proc_gateway. Recalibrate by changing the constant below.
             const int distance_time_ms = (stop_mode == "distance" && speed_rpm > 0)
-                ? std::max(100, int(std::abs(distance) * 30000.0 / double(std::abs(speed_rpm))))
+                ? std::max(100, int(std::abs(distance) * 300000.0 / double(std::abs(speed_rpm))))
                 : 0;
 
             const QVector<int> rails_copy = watched_rails;
