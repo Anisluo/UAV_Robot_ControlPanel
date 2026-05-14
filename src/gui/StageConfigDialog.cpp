@@ -148,19 +148,26 @@ void StageConfigDialog::buildUi()
     auto *btns = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel, this);
     btns->button(QDialogButtonBox::Save)->setText(QStringLiteral("保存"));
     btns->button(QDialogButtonBox::Cancel)->setText(QStringLiteral("取消"));
-    // CRITICAL: before accepting we have to commit any pending spinbox /
-    // line-edit. Qt's QSpinBox::value() returns the last *committed* value,
-    // NOT what's currently displayed if the user typed but didn't tab/Enter.
-    // Without this, "change force_pct 30 → 50, click 保存" saved 30 because
-    // the in-progress edit hadn't been interpreted yet.
+    // CRITICAL: before accepting we have to commit any pending spinbox
+    // edit. QSpinBox::value() returns the last *committed* value, not the
+    // text currently in the line-edit. Without this, "change force_pct
+    // 30 → 50, click 保存" saved 30 because the typed edit hadn't been
+    // interpreted yet.
+    //
+    // Brute-force approach: walk every QAbstractSpinBox (QSpinBox /
+    // QDoubleSpinBox) child of the dialog and call interpretText() on it.
+    // That commits the in-progress text into value() regardless of which
+    // widget currently holds focus.
     connect(btns, &QDialogButtonBox::accepted, this, [this]() {
-        // 1. Force the active edit-in-progress widget to commit.
-        if (auto *fw = QApplication::focusWidget()) {
-            if (auto *sb = qobject_cast<QAbstractSpinBox*>(fw)) sb->interpretText();
-            fw->clearFocus();   // triggers editingFinished on every editor
-        }
-        // 2. Flush editor fields → steps_[cur_row_] one more time after
-        //    any deferred valueChanged signals fire.
+        const auto spinboxes = this->findChildren<QAbstractSpinBox*>();
+        for (auto *sb : spinboxes) sb->interpretText();
+        // clearFocus() on focused widget too — fires editingFinished
+        // signals for line edits / combos any subscriber might be waiting on
+        if (auto *fw = QApplication::focusWidget()) fw->clearFocus();
+        // Flush editor fields into steps_[cur_row_]. By now every spinbox's
+        // value() returns the typed number; valueChanged should also have
+        // fired into onParamChanged. Re-running readEditorsTo is the belt-
+        // and-suspenders to make sure steps_ has the final values.
         if (cur_row_ >= 0 && cur_row_ < steps_.size()) {
             readEditorsTo(steps_[cur_row_]);
         }
