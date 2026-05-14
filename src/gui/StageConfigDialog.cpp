@@ -138,13 +138,28 @@ void StageConfigDialog::buildUi()
 
     body->addLayout(right, /*stretch=*/3);
 
-    // ── Bottom: OK / Cancel ─────────────────────────────────────────
+    // ── Bottom: 执行 (current step) + 保存 / 取消 ───────────────────
+    auto *bottom_row = new QHBoxLayout;
+    btn_execute_ = new QPushButton(QStringLiteral("▶ 执行"), this);
+    btn_execute_->setToolTip(QStringLiteral("用当前编辑器里的参数, 立即在真机上执行选中的步骤"));
+    btn_execute_->setStyleSheet(
+        "QPushButton{ background:#3a8; color:white; font-weight:bold;"
+        " padding:6px 18px; border-radius:4px; }"
+        "QPushButton:hover{ background:#4ba; }"
+        "QPushButton:disabled{ background:#446; color:#aab; }");
+    btn_execute_->setEnabled(false);
+    connect(btn_execute_, &QPushButton::clicked,
+            this, &StageConfigDialog::onExecuteCurrentStep);
+    bottom_row->addWidget(btn_execute_);
+    bottom_row->addStretch(1);
+
     auto *btns = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel, this);
     btns->button(QDialogButtonBox::Save)->setText(QStringLiteral("保存"));
     btns->button(QDialogButtonBox::Cancel)->setText(QStringLiteral("取消"));
     connect(btns, &QDialogButtonBox::accepted, this, &QDialog::accept);
     connect(btns, &QDialogButtonBox::rejected, this, &QDialog::reject);
-    root->addWidget(btns);
+    bottom_row->addWidget(btns);
+    root->addLayout(bottom_row);
 }
 
 void StageConfigDialog::buildEditPanels()
@@ -176,40 +191,7 @@ void StageConfigDialog::buildEditPanels()
         connect(mj_speed_, QOverload<int>::of(&QSpinBox::valueChanged),
                 this, &StageConfigDialog::onParamChanged);
         grid->addWidget(mj_speed_, 6, 1);
-
-        // ▶ 运动到该点 — fire arm.move_joints with the configured angles
-        // so the operator can preview-test the pose before saving. Same
-        // RPC the script orchestrator uses, so behavior matches what you'd
-        // get when this step actually runs.
-        auto *btn_goto = new QPushButton(QStringLiteral("▶ 运动到该点"), w);
-        btn_goto->setStyleSheet(
-            "QPushButton{ background:#3a8; color:white; font-weight:bold;"
-            " padding:4px 14px; border-radius:4px; }"
-            "QPushButton:hover{ background:#4ba; }"
-            "QPushButton:disabled{ background:#446; color:#aab; }");
-        connect(btn_goto, &QPushButton::clicked, this, [this, btn_goto]() {
-            if (!rpc_ || !rpc_->isConnected()) {
-                QMessageBox::warning(this, "RPC", "未连接到 RK3588, 无法执行");
-                return;
-            }
-            QJsonArray j;
-            for (int i = 0; i < 6; ++i) j.append(mj_j_[i]->value());
-            QJsonObject p;
-            p["joints"]      = j;
-            p["speed_ratio"] = mj_speed_->value() / 100.0;
-            btn_goto->setEnabled(false);
-            rpc_->call(QStringLiteral("arm.move_joints"), p,
-                [btn_goto](QJsonObject /*reply*/) {
-                    // re-enable after backend responds; UI thread, safe
-                    btn_goto->setEnabled(true);
-                });
-            // Hard re-enable after 8s in case the RPC reply never arrives
-            QTimer::singleShot(8000, btn_goto,
-                [btn_goto]() { btn_goto->setEnabled(true); });
-        });
-        grid->addWidget(btn_goto, 7, 0, 1, 3);
-
-        grid->setRowStretch(8, 1);
+        grid->setRowStretch(7, 1);
         editor_stack_->insertWidget(int(StepType::MOVE_JOINTS), w);
     }
 
@@ -710,6 +692,7 @@ void StageConfigDialog::showRow(int row)
     btn_up_->setEnabled(valid && row > 0);
     btn_dn_->setEnabled(valid && row < steps_.size() - 1);
     editor_stack_->setEnabled(valid);
+    if (btn_execute_) btn_execute_->setEnabled(valid);
 
     if (!valid) {
         editor_title_->setText(QStringLiteral("<i>选中左侧某行查看参数</i>"));
@@ -895,6 +878,146 @@ void StageConfigDialog::onParamChanged()
     auto *item = list_->item(cur_row_);
     if (item) {
         item->setText(stepRowText(cur_row_, steps_[cur_row_]));
+    }
+}
+
+// ▶ 执行: fire-and-forget the RPC for the currently-selected step using
+// the live editor values. Same RPC the script orchestrator would issue,
+// minus the advance-timer / status-poll plumbing — this is just a
+// "try this one step on the real arm" preview.
+void StageConfigDialog::onExecuteCurrentStep()
+{
+    if (cur_row_ < 0 || cur_row_ >= steps_.size()) return;
+    if (!rpc_ || !rpc_->isConnected()) {
+        QMessageBox::warning(this, QStringLiteral("RPC"),
+            QStringLiteral("未连接到 RK3588, 无法执行"));
+        return;
+    }
+    // Make sure latest editor values are flushed into steps_[cur_row_]
+    // (normally happens via valueChanged, but harmless to re-do).
+    readEditorsTo(steps_[cur_row_]);
+    const TaskStep &s = steps_[cur_row_];
+
+    auto nullCb = [](QJsonObject) {};
+    btn_execute_->setEnabled(false);
+    QTimer::singleShot(3000, btn_execute_,
+        [this]() { if (btn_execute_) btn_execute_->setEnabled(cur_row_ >= 0); });
+
+    switch (s.type) {
+        case StepType::MOVE_JOINTS: {
+            QJsonArray j;
+            for (const QVariant &v : s.params.value("joints").toList()) j.append(v.toDouble());
+            QJsonObject p;
+            p["joints"]      = j;
+            p["speed_ratio"] = s.params.value("speed_ratio", 0.3).toDouble();
+            rpc_->call(QStringLiteral("arm.move_joints"), p, nullCb);
+            break;
+        }
+        case StepType::MOVE_CARTESIAN: {
+            QJsonObject p;
+            p["X_mm"]   = s.params.value("x_mm").toDouble();
+            p["Y_mm"]   = s.params.value("y_mm").toDouble();
+            p["Z_mm"]   = s.params.value("z_mm").toDouble();
+            p["RX_deg"] = s.params.value("rx_deg").toDouble();
+            p["RY_deg"] = s.params.value("ry_deg").toDouble();
+            p["RZ_deg"] = s.params.value("rz_deg").toDouble();
+            p["mode"]   = s.params.value("mode", "P").toString();
+            rpc_->call(QStringLiteral("piper.move_cartesian"), p, nullCb);
+            break;
+        }
+        case StepType::GRIPPER: {
+            QJsonObject p;
+            p["angle_mm"]   = s.params.value("angle_mm", 60.0).toDouble();
+            p["effort_mNm"] = s.params.value("force_pct", 30).toInt() * 20.0; // 0..100% → 0..2000
+            rpc_->call(QStringLiteral("piper.set_gripper_angle"), p, nullCb);
+            break;
+        }
+        case StepType::AIRPORT_RAIL: {
+            // STOP rail then 300 ms later fire the motion command.
+            // Matches what dispatchScriptStep does, minus the stall-poll
+            // advance machinery.
+            const QString action = s.params.value("action", "lock").toString();
+            const QString stop_mode = s.params.value("stop_mode", "stall").toString();
+            const int rpm = s.params.value("speed_rpm", 1500).toInt();
+            const double dist = s.params.value("distance_mm", 50.0).toDouble();
+            QString stop_method = "airport.stop_all";
+            QJsonObject stop_p;
+            int direction = +1;
+            QJsonArray watched_rails;
+            if (action == "release") { direction = -1; watched_rails = {0,2}; }
+            else if (action == "rail2_fwd") { direction = +1; watched_rails = {1};
+                stop_method = "airport.stop"; stop_p["rail"] = 1; }
+            else if (action == "rail2_back") { direction = -1; watched_rails = {1};
+                stop_method = "airport.stop"; stop_p["rail"] = 1; }
+            else { direction = +1; watched_rails = {0,2}; }
+            rpc_->call(stop_method, stop_p, nullCb);
+            QTimer::singleShot(300, this,
+                [this, action, stop_mode, rpm, dist, direction, watched_rails]() {
+                    if (!rpc_) return;
+                    if (stop_mode == "distance") {
+                        // GUI 计时方式 (matches Tab4 dispatch)
+                        const int time_ms = std::max(100,
+                            int(std::abs(dist) * 300000.0 / double(std::abs(rpm))));
+                        for (const QJsonValue &rv : watched_rails) {
+                            QJsonObject p;
+                            p["rail"]      = rv.toInt();
+                            p["speed_rpm"] = std::abs(rpm) * (direction >= 0 ? +1 : -1);
+                            rpc_->call("airport.set_speed", p, [](QJsonObject){});
+                        }
+                        const QJsonArray rails_copy = watched_rails;
+                        QTimer::singleShot(time_ms, this, [this, rails_copy]() {
+                            if (!rpc_) return;
+                            for (const QJsonValue &rv : rails_copy) {
+                                QJsonObject sp; sp["rail"] = rv.toInt();
+                                rpc_->call("airport.stop", sp, [](QJsonObject){});
+                            }
+                        });
+                    } else {
+                        // stall mode: lock/release/set_speed → backend monitor 自动停
+                        QJsonObject p;
+                        p["speed_rpm"] = rpm;
+                        if (action == "release") {
+                            rpc_->call("airport.release", p, [](QJsonObject){});
+                        } else if (action == "rail2_fwd" || action == "rail2_back") {
+                            p["rail"] = 1;
+                            p["speed_rpm"] = (action == "rail2_fwd") ? rpm : -rpm;
+                            rpc_->call("airport.set_speed", p, [](QJsonObject){});
+                        } else {
+                            rpc_->call("airport.lock", p, [](QJsonObject){});
+                        }
+                    }
+                });
+            break;
+        }
+        case StepType::AIRPORT_GRIPPER: {
+            QJsonObject p;
+            p["open"] = s.params.value("open").toBool();
+            rpc_->call(QStringLiteral("airport.gripper"), p, nullCb);
+            break;
+        }
+        case StepType::WAIT_DETECT_UAV:
+        case StepType::WAIT_DETECT_BAT:
+            QMessageBox::information(this, QStringLiteral("等待检测"),
+                QStringLiteral("此类步骤在脚本执行时轮询检测状态, 单独执行无意义"));
+            break;
+        case StepType::DWELL: {
+            const int ms = s.params.value("ms", 1000).toInt();
+            QMessageBox::information(this, QStringLiteral("DWELL"),
+                QStringLiteral("DWELL 是纯延时 %1ms, 单独执行只是干等").arg(ms));
+            break;
+        }
+        case StepType::FIX_POINT: {
+            QJsonObject p;
+            p["X_mm"]   = s.params.value("x_mm").toDouble();
+            p["Y_mm"]   = s.params.value("y_mm").toDouble();
+            p["Z_mm"]   = s.params.value("z_mm").toDouble();
+            p["RX_deg"] = s.params.value("rx_deg").toDouble();
+            p["RY_deg"] = s.params.value("ry_deg").toDouble();
+            p["RZ_deg"] = s.params.value("rz_deg").toDouble();
+            p["mode"]   = "P";
+            rpc_->call(QStringLiteral("piper.move_cartesian"), p, nullCb);
+            break;
+        }
     }
 }
 

@@ -52,6 +52,7 @@ private slots:
     void onRowChanged(int row);
     void onRecordCurrentJoints();
     void onParamChanged();       // any editor field → write back into steps_[cur_row]
+    void onExecuteCurrentStep(); // 用当前编辑器参数立刻在真机上执行选中步骤
 
 private:
     void buildUi();
@@ -74,6 +75,7 @@ private:
     QPushButton *btn_up_    = nullptr;
     QPushButton *btn_dn_    = nullptr;
     QPushButton *btn_record_= nullptr;
+    QPushButton *btn_execute_ = nullptr;   // 底部 ▶ 执行 — 立刻跑选中步骤
 
     // right side: stacked editors per type, indexed by int(StepType)
     QStackedWidget *editor_stack_ = nullptr;
