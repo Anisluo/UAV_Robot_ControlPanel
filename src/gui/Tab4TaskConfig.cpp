@@ -1457,25 +1457,42 @@ void Tab4TaskConfig::dispatchScriptStep(const TaskStep &step)
 
             rpc_->call(stop_method, stop_params);
 
-            // Build the actual motion command(s) per stop_mode:
-            //   stall    → set_speed / lock / release   (existing behavior)
-            //   distance → one airport.move_distance call per watched rail
-            //              (signed by direction)
+            // Compute the motion time for distance mode using the existing
+            // set_speed RPC + a STOP timer. Formula matches the empirically-
+            // verified 50 mm/s at 1500 rpm (ZDT Emm V5.0, 200 microsteps/rev,
+            // pulses_per_mm=100): mm/s = rpm / 30, so time_ms = mm*30000/rpm.
+            // This works today without redeploying proc_gateway. If the
+            // operator's hardware differs (different microstep or screw lead),
+            // they can adjust speed_rpm to compensate.
+            const int distance_time_ms = (stop_mode == "distance" && speed_rpm > 0)
+                ? std::max(100, int(std::abs(distance) * 30000.0 / double(std::abs(speed_rpm))))
+                : 0;
+
             const QVector<int> rails_copy = watched_rails;
             QTimer::singleShot(kStallSettleMs, this,
-                [this, action, stop_mode, speed_rpm, distance, direction,
+                [this, action, stop_mode, speed_rpm, direction, distance_time_ms,
                  rails_copy, cb_log_err]() {
                     if (!rpc_) return;
                     if (stop_mode == "distance") {
-                        const double signed_mm =
-                            std::abs(distance) * (direction >= 0 ? +1.0 : -1.0);
+                        // Distance mode = set_speed + timer + stop. Use the
+                        // same direction sign as stall mode.
                         for (int rail_idx : rails_copy) {
                             QJsonObject p;
                             p[Protocol::Fields::RAIL]      = rail_idx;
-                            p["distance_mm"]               = signed_mm;
-                            p[Protocol::Fields::SPEED_RPM] = std::abs(speed_rpm);
-                            rpc_->call(Protocol::Methods::AIRPORT_MOVE_DISTANCE, p, cb_log_err);
+                            p[Protocol::Fields::SPEED_RPM] =
+                                std::abs(speed_rpm) * (direction >= 0 ? +1 : -1);
+                            rpc_->call(Protocol::Methods::AIRPORT_SET_SPEED, p, cb_log_err);
                         }
+                        // Schedule the stop after the computed time.
+                        QTimer::singleShot(distance_time_ms, this,
+                            [this, rails_copy]() {
+                                if (!rpc_) return;
+                                for (int rail_idx : rails_copy) {
+                                    QJsonObject sp;
+                                    sp[Protocol::Fields::RAIL] = rail_idx;
+                                    rpc_->call(Protocol::Methods::AIRPORT_STOP, sp);
+                                }
+                            });
                     } else {
                         // stall mode
                         QJsonObject p;
@@ -1493,7 +1510,9 @@ void Tab4TaskConfig::dispatchScriptStep(const TaskStep &step)
                     }
                 });
 
-            duration_ms = max_ms + kStallSettleMs;
+            duration_ms = (stop_mode == "distance")
+                ? (kStallSettleMs + distance_time_ms + 500)   // pre-stop + move + 500ms grace
+                : (max_ms + kStallSettleMs);
 
             // Status poll — advance condition depends on stop_mode.
             const int session_run_idx = flow_step_run_idx_;
@@ -1504,7 +1523,7 @@ void Tab4TaskConfig::dispatchScriptStep(const TaskStep &step)
                 });
 
             const QString mode_label = (stop_mode == "distance")
-                ? QString("固定 %1mm").arg(std::abs(distance), 0, 'f', 1)
+                ? QString("固定 %1mm (~%2ms)").arg(std::abs(distance), 0, 'f', 1).arg(distance_time_ms)
                 : QString("堵转停");
             appendLog("info",
                 QString("▶ [%1/%2] AIRPORT_RAIL %3 @ %4rpm  %5  (%6ms 急停 + 最长 %7ms)%8")
