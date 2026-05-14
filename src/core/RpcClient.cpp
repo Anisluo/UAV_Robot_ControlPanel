@@ -168,7 +168,25 @@ void RpcClient::onReadyRead()
 
         if (id >= 0 && pending_.contains(id)) {
             auto cb = pending_.take(id);
-            QJsonObject result = resp.value("result").toObject();
+            // proc_piper inconsistency: most methods return result as an
+            // object ({"ok":true, "angles":[...]} etc.) but arm.get_pose
+            // returns the bare list ([x,y,z,rx,ry,rz]). When result is an
+            // array, .toObject() silently returns empty and the caller
+            // loses the data. Detect and wrap under a synthetic key so
+            // callbacks can recover it via reply.value("_array").toArray().
+            const QJsonValue raw = resp.value("result");
+            QJsonObject result;
+            if (raw.isObject()) {
+                result = raw.toObject();
+            } else if (raw.isArray()) {
+                result["_array"] = raw.toArray();
+            }
+            // Also forward any top-level error so callbacks can detect it
+            // (m_piper_handshake etc. report errors here when the arm is
+            // in STANDBY).
+            if (resp.contains("error")) {
+                result["error"] = resp.value("error");
+            }
             cb(result);
         }
     }

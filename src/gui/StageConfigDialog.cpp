@@ -523,11 +523,12 @@ void StageConfigDialog::buildEditPanels()
             if (!rpc_) return;
             rpc_->call(QStringLiteral("arm.get_pose"), QJsonObject{},
                 [this](QJsonObject reply) {
-                    // proc_piper returns either {pose:[x,y,z,rx,ry,rz]} (mm,deg)
-                    // or the legacy {x_mm, y_mm, z_mm, rx_deg, ry_deg, rz_deg}.
-                    // Accept both.
+                    // proc_piper returns arm.get_pose as a bare List[float],
+                    // which RpcClient stashes under "_array". Fallback to
+                    // legacy named-key form.
                     QVector<double> v(6, 0.0);
-                    const QJsonArray arr = reply.value("pose").toArray();
+                    QJsonArray arr = reply.value("_array").toArray();
+                    if (arr.size() != 6) arr = reply.value("pose").toArray();
                     if (arr.size() == 6) {
                         for (int i = 0; i < 6; ++i) v[i] = arr[i].toDouble();
                     } else {

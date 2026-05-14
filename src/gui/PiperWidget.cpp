@@ -327,10 +327,12 @@ void PiperWidget::buildCartesianTab() {
 
         rpc_->call(QStringLiteral("arm.get_pose"), QJsonObject{},
             [this, fix_btn, err_cb](QJsonObject reply) {
-                // Reply schema: proc_piper returns either {pose:[x,y,z,rx,ry,rz]}
-                // or legacy {x_mm,y_mm,z_mm,roll_deg,pitch_deg,yaw_deg}
+                // proc_piper returns arm.get_pose as a bare list (List[float]),
+                // not a dict — RpcClient now exposes it under "_array".
+                // Fall back to legacy named-keys form for older backends.
                 double v[6] = {0,0,0,0,0,0};
-                const QJsonArray arr = reply.value("pose").toArray();
+                QJsonArray arr = reply.value("_array").toArray();
+                if (arr.size() != 6) arr = reply.value("pose").toArray();
                 if (arr.size() == 6) {
                     for (int i = 0; i < 6; ++i) v[i] = arr[i].toDouble();
                 } else {
@@ -610,10 +612,11 @@ void PiperWidget::pollJointsAndPose() {
 
     rpc_->call(Protocol::Methods::ARM_GET_POSE, QJsonObject{},
         [this](QJsonObject reply) {
-            QJsonArray arr;
-            if (reply.contains("result"))
-                arr = reply.value("result").toArray();
-            else if (reply.contains(Protocol::Fields::ANGLES))
+            // proc_piper returns arm.get_pose as List[float] (raw array).
+            // RpcClient stashes that under "_array". Fallback to named
+            // keys for any legacy / dict-shaped backend.
+            QJsonArray arr = reply.value("_array").toArray();
+            if (arr.size() != 6)
                 arr = reply.value(Protocol::Fields::ANGLES).toArray();
             if (arr.size() == 6) {
                 std::array<double, 6> p{};
