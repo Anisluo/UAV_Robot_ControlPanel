@@ -129,7 +129,10 @@ void PiperWidget::buildLayout() {
 
     top_layout->addStretch(1);
 
-    enable_btn_ = new QPushButton("使能", top_frame);
+    enable_btn_ = new QPushButton("使能 / 恢复", top_frame);
+    enable_btn_->setToolTip(
+        QStringLiteral("重新执行 V1.8-2 握手 (Resume → MasterSlave → STANDBY → CAN_CTRL → Enable)。\n"
+                       "撞机 / 急停 / 拖动示教退出后, 如果状态栏卡在 STANDBY 出不来 — 点这个。"));
     enable_btn_->setStyleSheet("QPushButton { background:#3a8; color:white; font-weight:bold; padding:4px 14px; }");
     top_layout->addWidget(enable_btn_);
 
@@ -708,6 +711,23 @@ void PiperWidget::updateStatusBar(int ctrl_mode, int arm_status, int /*mode_feed
     status_heartbeat_->setText(QString("心跳: %1").arg(hb ? "活" : "❌"));
     status_heartbeat_->setStyleSheet(hb ? "color:#3a8; font-family:monospace;"
                                         : "color:#c44; font-family:monospace;");
+
+    // Visual recovery hint: when the firmware drops out of CAN_CTRL (撞机 /
+    // 急停 / teach 退出后卡在 STANDBY), pulse the 使能/恢复 button red so
+    // the operator's eye lands on it instead of hunting for what to click.
+    if (enable_btn_) {
+        const bool needs_recover = (ctrl_mode != 0x01);   // CAN_CTRL
+        if (needs_recover) {
+            enable_btn_->setStyleSheet(
+                "QPushButton { background:#c44; color:white; font-weight:bold;"
+                "              padding:4px 14px; border:2px solid #ffb000; }"
+                "QPushButton:hover { background:#e55; }");
+        } else {
+            enable_btn_->setStyleSheet(
+                "QPushButton { background:#3a8; color:white; font-weight:bold;"
+                "              padding:4px 14px; }");
+        }
+    }
 }
 
 QString PiperWidget::ctrlModeText(int m) const {
