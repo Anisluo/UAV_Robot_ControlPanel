@@ -10,6 +10,7 @@
 #include <QPushButton>
 #include <QSlider>
 #include <QSpinBox>
+#include <QTimer>
 #include <QVBoxLayout>
 
 AirportWidget::AirportWidget(RpcClient *rpc, QWidget *parent)
@@ -219,28 +220,53 @@ void AirportWidget::onLock()
 {
     if (!rpc_ || !rpc_->isConnected()) return;
 
-    QJsonObject params;
-    params[Protocol::Fields::SPEED_RPM] = lock_spin_->value();
-    rpc_->call(Protocol::Methods::AIRPORT_LOCK, params);
+    // STOP → 300 ms → LOCK. Same stall-latch pre-empt as onRail2Move.
+    rpc_->call(Protocol::Methods::AIRPORT_STOP_ALL, QJsonObject{});
+    const int rpm = lock_spin_->value();
+    QTimer::singleShot(300, this, [this, rpm]() {
+        if (!rpc_ || !rpc_->isConnected()) return;
+        QJsonObject params;
+        params[Protocol::Fields::SPEED_RPM] = rpm;
+        rpc_->call(Protocol::Methods::AIRPORT_LOCK, params);
+    });
 }
 
 void AirportWidget::onRelease()
 {
     if (!rpc_ || !rpc_->isConnected()) return;
 
-    QJsonObject params;
-    params[Protocol::Fields::SPEED_RPM] = lock_spin_->value();
-    rpc_->call(Protocol::Methods::AIRPORT_RELEASE, params);
+    rpc_->call(Protocol::Methods::AIRPORT_STOP_ALL, QJsonObject{});
+    const int rpm = lock_spin_->value();
+    QTimer::singleShot(300, this, [this, rpm]() {
+        if (!rpc_ || !rpc_->isConnected()) return;
+        QJsonObject params;
+        params[Protocol::Fields::SPEED_RPM] = rpm;
+        rpc_->call(Protocol::Methods::AIRPORT_RELEASE, params);
+    });
 }
 
 void AirportWidget::onRail2Move(bool forward)
 {
     if (!rpc_ || !rpc_->isConnected()) return;
 
-    QJsonObject params;
-    params[Protocol::Fields::RAIL] = 1;
-    params[Protocol::Fields::SPEED_RPM] = rail2_spin_->value() * (forward ? 1 : -1);
-    rpc_->call(Protocol::Methods::AIRPORT_SET_SPEED, params);
+    // Pre-empt any latched stall state by issuing STOP first, waiting 300 ms
+    // for the firmware to settle, then sending SPEED. This mirrors what the
+    // operator was doing manually after stalls (前进 → 急停 → 后退) which
+    // they confirmed works reliably. Doing it client-side guarantees the
+    // motor sees the stop with timing before the next motion command, no
+    // matter what the backend's auto-recovery is doing.
+    QJsonObject stop_params;
+    stop_params[Protocol::Fields::RAIL] = 1;
+    rpc_->call(Protocol::Methods::AIRPORT_STOP, stop_params);
+
+    const int rpm = rail2_spin_->value() * (forward ? 1 : -1);
+    QTimer::singleShot(300, this, [this, rpm]() {
+        if (!rpc_ || !rpc_->isConnected()) return;
+        QJsonObject params;
+        params[Protocol::Fields::RAIL] = 1;
+        params[Protocol::Fields::SPEED_RPM] = rpm;
+        rpc_->call(Protocol::Methods::AIRPORT_SET_SPEED, params);
+    });
 }
 
 void AirportWidget::onStopAll()
