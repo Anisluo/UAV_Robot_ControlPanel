@@ -21,6 +21,8 @@ enum class StepType {
     WAIT_DETECT_UAV = 5,    // poll NPU, wait for class=4 present/absent
     WAIT_DETECT_BAT = 6,    // poll battery_tracker, wait for class=200
     DWELL           = 7,    // pure delay (ms)
+    FIX_POINT       = 8,    // hold TCP at a target pose for duration_ms
+                            // (定点跟踪 — arm goes to point, stays there)
 };
 
 struct TaskStep {
@@ -57,6 +59,13 @@ struct TaskStep {
 //                    counter. Per-rail completion monitor flips state
 //                    IDLE on reach / STALLED on early collision.
 //                  max_ms = GUI-side safety upper bound for both modes.
+// FIX_POINT        { x_mm, y_mm, z_mm, rx_deg, ry_deg, rz_deg,
+//                    duration_ms: int }
+//                  Drive the TCP to the recorded cartesian pose and hold
+//                  it there for duration_ms. While "holding", the arm
+//                  controller keeps the end-effector at the target —
+//                  joints may rebalance/correct, but TCP point stays
+//                  pinned. Useful for: "look at this point for N seconds".
 // AIRPORT_GRIPPER  { open: bool }
 // WAIT_DETECT_UAV  { present: bool, timeout_ms: int }
 //                  (present=true → wait until detected; false → wait until gone)

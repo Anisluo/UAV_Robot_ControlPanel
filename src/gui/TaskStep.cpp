@@ -20,6 +20,7 @@ QString TaskStep::typeLabel(StepType t)
         case StepType::WAIT_DETECT_UAV: return QStringLiteral("等待识别UAV");
         case StepType::WAIT_DETECT_BAT: return QStringLiteral("等待识别电池");
         case StepType::DWELL:           return QStringLiteral("延时");
+        case StepType::FIX_POINT:       return QStringLiteral("定点跟踪");
     }
     return QStringLiteral("?");
 }
@@ -83,6 +84,12 @@ QString TaskStep::summary() const
                 .arg(params.value("timeout_ms").toInt() / 1000.0, 0, 'f', 1);
         case StepType::DWELL:
             return QStringLiteral("%1 ms").arg(params.value("ms").toInt());
+        case StepType::FIX_POINT:
+            return QStringLiteral("(%1, %2, %3)mm  保持 %4ms")
+                .arg(params.value("x_mm").toDouble(), 0, 'f', 1)
+                .arg(params.value("y_mm").toDouble(), 0, 'f', 1)
+                .arg(params.value("z_mm").toDouble(), 0, 'f', 1)
+                .arg(params.value("duration_ms").toInt());
     }
     return {};
 }

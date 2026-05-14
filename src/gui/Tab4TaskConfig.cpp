@@ -818,6 +818,13 @@ QVector<Tab4TaskConfig::SimSegment> Tab4TaskConfig::buildSimPlaylist() const
                         seg.duration_ms = 1500;
                         seg.label = QStringLiteral("[%1] CARTESIAN (sim 占位)").arg(stage.title);
                         break;
+                    case StepType::FIX_POINT:
+                        // Sim 没 FK, 显示成 dwell.
+                        seg.duration_ms = std::max(500,
+                            step.params.value("duration_ms", 5000).toInt());
+                        seg.label = QStringLiteral("[%1] 定点跟踪 %2ms")
+                                        .arg(stage.title).arg(seg.duration_ms);
+                        break;
                 }
                 out.append(std::move(seg));
             }
@@ -1501,6 +1508,37 @@ void Tab4TaskConfig::dispatchScriptStep(const TaskStep &step)
             appendLog("info",
                 QString("▶ [%1/%2] DWELL %3ms%4")
                     .arg(step_num).arg(total).arg(ms).arg(note));
+            break;
+        }
+        case StepType::FIX_POINT: {
+            // 定点跟踪: send arm.move_cartesian to the recorded TCP, then dwell.
+            // While dwelling, the controller holds the TCP at target — the
+            // operator's "always point at this spot for N seconds" semantic.
+            const double x  = step.params.value("x_mm").toDouble();
+            const double y  = step.params.value("y_mm").toDouble();
+            const double z  = step.params.value("z_mm", 200.0).toDouble();
+            const double rx = step.params.value("rx_deg").toDouble();
+            const double ry = step.params.value("ry_deg", 85.0).toDouble();
+            const double rz = step.params.value("rz_deg").toDouble();
+            const int duration = std::max(200, step.params.value("duration_ms", 5000).toInt());
+
+            QJsonObject p;
+            p["x_mm"] = x;   p["y_mm"] = y;   p["z_mm"] = z;
+            p["rx_deg"] = rx; p["ry_deg"] = ry; p["rz_deg"] = rz;
+            p["mode"]  = "P";   // point-to-point (joint-space interpolation OK)
+            rpc_->call(Protocol::Methods::PIPER_MOVE_CARTESIAN, p, cb_log_err);
+
+            // duration_ms = travel-to-point time + the user's hold time.
+            // Use a fixed 1500 ms allowance for the move-to phase (Piper's
+            // typical max for a Cartesian step at default speed); the rest
+            // is pure dwell at the target.
+            duration_ms = 1500 + duration;
+            appendLog("info",
+                QString("▶ [%1/%2] 定点跟踪 (%3, %4, %5)mm RPY=(%6, %7, %8)° 保持 %9ms%10")
+                    .arg(step_num).arg(total)
+                    .arg(x, 0, 'f', 1).arg(y, 0, 'f', 1).arg(z, 0, 'f', 1)
+                    .arg(rx, 0, 'f', 1).arg(ry, 0, 'f', 1).arg(rz, 0, 'f', 1)
+                    .arg(duration).arg(note));
             break;
         }
         case StepType::AIRPORT_GRIPPER: {

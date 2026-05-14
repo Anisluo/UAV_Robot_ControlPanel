@@ -116,6 +116,16 @@ private:
 
     // DWELL
     QSpinBox       *dw_ms_     = nullptr;
+
+    // FIX_POINT (定点跟踪)
+    QDoubleSpinBox *fp_x_      = nullptr;
+    QDoubleSpinBox *fp_y_      = nullptr;
+    QDoubleSpinBox *fp_z_      = nullptr;
+    QDoubleSpinBox *fp_rx_     = nullptr;
+    QDoubleSpinBox *fp_ry_     = nullptr;
+    QDoubleSpinBox *fp_rz_     = nullptr;
+    QSpinBox       *fp_duration_ms_ = nullptr;
+    QPushButton    *btn_fp_record_  = nullptr;   // "录当前 TCP 为目标点"
 };
 
 #endif // STAGECONFIGDIALOG_H

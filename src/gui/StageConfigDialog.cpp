@@ -19,6 +19,7 @@
 #include <QDialogButtonBox>
 #include <QGroupBox>
 #include <QMessageBox>
+#include <QTimer>
 #include <QJsonArray>
 
 
@@ -75,7 +76,7 @@ void StageConfigDialog::buildUi()
 
     auto *add_row = new QHBoxLayout;
     cmb_add_ = new QComboBox(this);
-    for (int t = int(StepType::MOVE_JOINTS); t <= int(StepType::DWELL); ++t) {
+    for (int t = int(StepType::MOVE_JOINTS); t <= int(StepType::FIX_POINT); ++t) {
         cmb_add_->addItem(TaskStep::typeLabel(StepType(t)), int(t));
     }
     btn_add_  = new QPushButton(QStringLiteral("+ 加步骤"), this);
@@ -208,6 +209,54 @@ void StageConfigDialog::buildEditPanels()
         connect(mc_mode_, QOverload<int>::of(&QComboBox::currentIndexChanged),
                 this, &StageConfigDialog::onParamChanged);
         f->addRow("模式", mc_mode_);
+
+        // 🎯 定点测试 — 实时打个示范动作: TCP 锁在配置的 (X,Y,Z), 但把
+        // RY 周期性扫 ±15° 来回, 关节角度跟着重新分配. 操作员能直观看到
+        // "笛卡尔点位锁住, 关节自己换姿态" 的效果. 不影响录制的步骤,
+        // 跟保存按钮无关.
+        auto *btn_fix = new QPushButton(QStringLiteral("🎯 定点测试 (TCP 锁住, 摆姿态)"), w);
+        btn_fix->setStyleSheet(
+            "QPushButton{ background:#357ec7; color:white; font-weight:bold;"
+            " padding:4px 10px; border-radius:4px; }"
+            "QPushButton:hover{ background:#4689d8; }"
+            "QPushButton:disabled{ background:#446; color:#aab; }");
+        connect(btn_fix, &QPushButton::clicked, this, [this, btn_fix]() {
+            if (!rpc_ || !rpc_->isConnected()) {
+                QMessageBox::warning(this, "RPC", "未连接到 RK3588, 无法测试");
+                return;
+            }
+            const double x  = mc_x_->value();
+            const double y  = mc_y_->value();
+            const double z  = mc_z_->value();
+            const double rx = mc_rx_->value();
+            const double ry0 = mc_ry_->value();
+            const double rz = mc_rz_->value();
+            // RY 来回扫 +15 / -15, 大约 5 秒走完一圈
+            const QVector<double> ry_seq = { ry0 + 15.0, ry0 - 15.0,
+                                              ry0 + 15.0, ry0 };
+            constexpr int kStepMs = 1200;   // 单段允许时长
+            btn_fix->setEnabled(false);
+            for (int i = 0; i < ry_seq.size(); ++i) {
+                QTimer::singleShot(i * kStepMs, this,
+                    [this, x, y, z, rx, ry = ry_seq[i], rz]() {
+                        if (!rpc_) return;
+                        QJsonObject p;
+                        p["x_mm"]  = x;  p["y_mm"]  = y;  p["z_mm"]  = z;
+                        p["rx_deg"] = rx; p["ry_deg"] = ry; p["rz_deg"] = rz;
+                        p["mode"]  = "P";
+                        rpc_->call(QStringLiteral("piper.move_cartesian"), p);
+                    });
+            }
+            // 跑完后恢复按钮
+            QTimer::singleShot(ry_seq.size() * kStepMs + 500, btn_fix,
+                [btn_fix]() { btn_fix->setEnabled(true); });
+        });
+        f->addRow(btn_fix);
+        f->addRow(new QLabel(
+            QStringLiteral("<i>定点测试: 点击后臂会在 RY ±15° 之间来回扫 4 次,"
+                           "TCP (X,Y,Z) 始终锁在配置位置. 看关节角度变化 + TCP"
+                           "在同一点就说明 OK. 大约 5 秒.</i>"),
+            w));
         editor_stack_->insertWidget(int(StepType::MOVE_CARTESIAN), w);
     }
 
@@ -370,6 +419,100 @@ void StageConfigDialog::buildEditPanels()
         f->addRow(QStringLiteral("时长"), dw_ms_);
         editor_stack_->insertWidget(int(StepType::DWELL), w);
     }
+
+    // 8 FIX_POINT (定点跟踪 — arm.move_cartesian to a target then hold for ms)
+    {
+        auto *w = new QWidget(this);
+        auto *f = new QFormLayout(w);
+        f->setContentsMargins(8, 8, 8, 8);
+
+        auto makePosSpin = [w](double range, int dec, const QString &suffix,
+                               double defv) {
+            auto *sp = new QDoubleSpinBox(w);
+            sp->setRange(-range, range);
+            sp->setDecimals(dec);
+            sp->setSuffix(suffix);
+            sp->setValue(defv);
+            sp->setSingleStep(1.0);
+            return sp;
+        };
+        fp_x_  = makePosSpin(1500.0, 1, "mm",  0.0);
+        fp_y_  = makePosSpin(1500.0, 1, "mm",  0.0);
+        fp_z_  = makePosSpin(1500.0, 1, "mm", 200.0);
+        fp_rx_ = makePosSpin(180.0,  1, "°",   0.0);
+        fp_ry_ = makePosSpin(180.0,  1, "°",  85.0);
+        fp_rz_ = makePosSpin(180.0,  1, "°",   0.0);
+
+        fp_duration_ms_ = new QSpinBox(w);
+        fp_duration_ms_->setRange(100, 600000);
+        fp_duration_ms_->setValue(5000);
+        fp_duration_ms_->setSingleStep(500);
+        fp_duration_ms_->setSuffix("ms");
+
+        btn_fp_record_ = new QPushButton(QStringLiteral("📍 录当前 TCP 为目标点"), w);
+        btn_fp_record_->setStyleSheet(
+            "QPushButton{ background:#3a8; color:white; font-weight:bold;"
+            " padding:4px 10px; border-radius:4px; }"
+            "QPushButton:hover{ background:#4ba; }");
+
+        auto bindD = [this](QDoubleSpinBox *sp) {
+            connect(sp, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+                    this, &StageConfigDialog::onParamChanged);
+        };
+        bindD(fp_x_); bindD(fp_y_); bindD(fp_z_);
+        bindD(fp_rx_); bindD(fp_ry_); bindD(fp_rz_);
+        connect(fp_duration_ms_, QOverload<int>::of(&QSpinBox::valueChanged),
+                this, &StageConfigDialog::onParamChanged);
+
+        // Record-TCP button: pull live pose via arm.get_pose, fill the
+        // 6 spinboxes. Mirrors the 录当前关节 helper for MOVE_JOINTS.
+        connect(btn_fp_record_, &QPushButton::clicked, this, [this]() {
+            if (!rpc_) return;
+            rpc_->call(QStringLiteral("arm.get_pose"), QJsonObject{},
+                [this](QJsonObject reply) {
+                    // proc_piper returns either {pose:[x,y,z,rx,ry,rz]} (mm,deg)
+                    // or the legacy {x_mm, y_mm, z_mm, rx_deg, ry_deg, rz_deg}.
+                    // Accept both.
+                    QVector<double> v(6, 0.0);
+                    const QJsonArray arr = reply.value("pose").toArray();
+                    if (arr.size() == 6) {
+                        for (int i = 0; i < 6; ++i) v[i] = arr[i].toDouble();
+                    } else {
+                        v[0] = reply.value("x_mm").toDouble();
+                        v[1] = reply.value("y_mm").toDouble();
+                        v[2] = reply.value("z_mm").toDouble();
+                        v[3] = reply.value("rx_deg").toDouble();
+                        v[4] = reply.value("ry_deg").toDouble();
+                        v[5] = reply.value("rz_deg").toDouble();
+                    }
+                    const QSignalBlocker b0(fp_x_), b1(fp_y_), b2(fp_z_);
+                    const QSignalBlocker b3(fp_rx_), b4(fp_ry_), b5(fp_rz_);
+                    fp_x_->setValue(v[0]); fp_y_->setValue(v[1]); fp_z_->setValue(v[2]);
+                    fp_rx_->setValue(v[3]); fp_ry_->setValue(v[4]); fp_rz_->setValue(v[5]);
+                    onParamChanged();
+                });
+        });
+
+        auto *posRow = new QHBoxLayout;
+        posRow->addWidget(new QLabel("X")); posRow->addWidget(fp_x_, 1);
+        posRow->addWidget(new QLabel("Y")); posRow->addWidget(fp_y_, 1);
+        posRow->addWidget(new QLabel("Z")); posRow->addWidget(fp_z_, 1);
+        auto *rotRow = new QHBoxLayout;
+        rotRow->addWidget(new QLabel("RX")); rotRow->addWidget(fp_rx_, 1);
+        rotRow->addWidget(new QLabel("RY")); rotRow->addWidget(fp_ry_, 1);
+        rotRow->addWidget(new QLabel("RZ")); rotRow->addWidget(fp_rz_, 1);
+
+        f->addRow(QStringLiteral("位置"), posRow);
+        f->addRow(QStringLiteral("姿态"), rotRow);
+        f->addRow(QStringLiteral("时长"), fp_duration_ms_);
+        f->addRow(btn_fp_record_);
+        f->addRow(new QLabel(
+            QStringLiteral("<i>arm.move_cartesian 到目标位姿, 保持时长内 TCP "
+                           "钉在该点; Piper 控制器自己平衡关节, 不再回报新的目标</i>"),
+            w));
+
+        editor_stack_->insertWidget(int(StepType::FIX_POINT), w);
+    }
 }
 
 
@@ -471,6 +614,15 @@ void StageConfigDialog::onAddStep()
             break;
         case StepType::DWELL:
             s.params["ms"] = 1000;
+            break;
+        case StepType::FIX_POINT:
+            s.params["x_mm"]       = 0.0;
+            s.params["y_mm"]       = 0.0;
+            s.params["z_mm"]       = 200.0;
+            s.params["rx_deg"]     = 0.0;
+            s.params["ry_deg"]     = 85.0;
+            s.params["rz_deg"]     = 0.0;
+            s.params["duration_ms"] = 5000;
             break;
     }
     steps_.append(s);
@@ -621,6 +773,19 @@ void StageConfigDialog::showRow(int row)
         case StepType::DWELL:
             dw_ms_->setValue(s.params.value("ms", 1000).toInt());
             break;
+        case StepType::FIX_POINT: {
+            const QSignalBlocker b0(fp_x_), b1(fp_y_), b2(fp_z_);
+            const QSignalBlocker b3(fp_rx_), b4(fp_ry_), b5(fp_rz_);
+            const QSignalBlocker b6(fp_duration_ms_);
+            fp_x_->setValue(s.params.value("x_mm").toDouble());
+            fp_y_->setValue(s.params.value("y_mm").toDouble());
+            fp_z_->setValue(s.params.value("z_mm", 200.0).toDouble());
+            fp_rx_->setValue(s.params.value("rx_deg").toDouble());
+            fp_ry_->setValue(s.params.value("ry_deg", 85.0).toDouble());
+            fp_rz_->setValue(s.params.value("rz_deg").toDouble());
+            fp_duration_ms_->setValue(s.params.value("duration_ms", 5000).toInt());
+            break;
+        }
     }
 
     for (auto *e : editors) e->blockSignals(false);
@@ -672,6 +837,15 @@ void StageConfigDialog::readEditorsTo(TaskStep &s)
             break;
         case StepType::DWELL:
             s.params["ms"] = dw_ms_->value();
+            break;
+        case StepType::FIX_POINT:
+            s.params["x_mm"]        = fp_x_->value();
+            s.params["y_mm"]        = fp_y_->value();
+            s.params["z_mm"]        = fp_z_->value();
+            s.params["rx_deg"]      = fp_rx_->value();
+            s.params["ry_deg"]      = fp_ry_->value();
+            s.params["rz_deg"]      = fp_rz_->value();
+            s.params["duration_ms"] = fp_duration_ms_->value();
             break;
     }
 }
