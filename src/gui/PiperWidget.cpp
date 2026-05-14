@@ -366,10 +366,15 @@ void PiperWidget::buildCartesianTab() {
                     QTimer::singleShot(i * kStepMs, this,
                         [this, x, y, z, rx, ry = ry_seq[i], rz, err_cb]() {
                             if (!rpc_) return;
+                            // mode = "L" (笛卡尔直线插值) 关键!
+                            // 起点终点 X/Y/Z 相同时, Cartesian linear 路径
+                            // 长度为 0, TCP 全程钉在 (x,y,z), 只有姿态在
+                            // slerp. 用 "P" (关节插值) 的话, joints 直线
+                            // 过去过程中 TCP 会绕一道弧.
                             QJsonObject p;
                             p["X_mm"]   = x;  p["Y_mm"]   = y;  p["Z_mm"]   = z;
                             p["RX_deg"] = rx; p["RY_deg"] = ry; p["RZ_deg"] = rz;
-                            p["mode"]   = "P";
+                            p["mode"]   = "L";
                             rpc_->call(QStringLiteral("piper.move_cartesian"),
                                        p, err_cb);
                         });

@@ -290,13 +290,12 @@ void StageConfigDialog::buildEditPanels()
                 QTimer::singleShot(i * kStepMs, this,
                     [this, x, y, z, rx, ry = ry_seq[i], rz]() {
                         if (!rpc_) return;
-                        // piper.move_cartesian needs UPPERCASE X_mm/Y_mm/Z_mm
-                        // + RX_deg/RY_deg/RZ_deg (see m_piper_move_cartesian
-                        // signature in proc_piper.py).
+                        // mode="L" (笛卡尔线性): 起终 X/Y/Z 一致 → TCP 全程
+                        // 锁住; 只有姿态 slerp. "P" 走关节空间 → TCP 弧线漂移.
                         QJsonObject p;
                         p["X_mm"]   = x;  p["Y_mm"]   = y;  p["Z_mm"]   = z;
                         p["RX_deg"] = rx; p["RY_deg"] = ry; p["RZ_deg"] = rz;
-                        p["mode"]   = "P";
+                        p["mode"]   = "L";
                         rpc_->call(QStringLiteral("piper.move_cartesian"), p);
                     });
             }
