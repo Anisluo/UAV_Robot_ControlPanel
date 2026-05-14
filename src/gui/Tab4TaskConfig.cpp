@@ -1850,24 +1850,27 @@ void Tab4TaskConfig::onStageConfigClicked(QString stage_id)
     const QVector<TaskStep> existing = stage_scripts_.value(stage_id);
 
     StageConfigDialog dlg(stage_id, title, existing, rpc_, this);
-    if (dlg.exec() != QDialog::Accepted) return;
-
-    stage_scripts_[stage_id] = dlg.steps();
-
-    // Persist the entire 9-stage bundle on every accept — cheap, atomic
-    // via QSaveFile, and means we never lose work if HostGUI crashes.
-    TaskConfig cfg;
-    cfg.scripts = stage_scripts_;
-    if (!cfg.saveToHomeFile()) {
-        appendLog("error",
-            QString("[stages] 保存失败: %1").arg(TaskConfig::homeFilePath()));
-        QMessageBox::warning(this, QStringLiteral("保存失败"),
-                              QStringLiteral("写入 %1 失败").arg(TaskConfig::homeFilePath()));
-        return;
-    }
-    appendLog("info",
-        QString("[stages] %1 步骤已保存到 %2 (%3 步)")
-            .arg(stage_id)
-            .arg(TaskConfig::homeFilePath())
-            .arg(stage_scripts_[stage_id].size()));
+    // 对话框的 保存 按钮不再关窗口, 它发 saveStage 信号 → 这里写 JSON.
+    // 对话框保持打开, 操作员可以继续编辑 / 再次保存 / 验证.
+    connect(&dlg, &StageConfigDialog::saveStage, this,
+        [this, stage_id](const QVector<TaskStep> &steps) {
+            stage_scripts_[stage_id] = steps;
+            TaskConfig cfg;
+            cfg.scripts = stage_scripts_;
+            if (!cfg.saveToHomeFile()) {
+                appendLog("error",
+                    QString("[stages] 保存失败: %1").arg(TaskConfig::homeFilePath()));
+                QMessageBox::warning(this, QStringLiteral("保存失败"),
+                    QStringLiteral("写入 %1 失败").arg(TaskConfig::homeFilePath()));
+                return;
+            }
+            appendLog("info",
+                QString("[stages] %1 步骤已保存到 %2 (%3 步)")
+                    .arg(stage_id)
+                    .arg(TaskConfig::homeFilePath())
+                    .arg(stage_scripts_[stage_id].size()));
+        });
+    // 取消 / X 都走 reject, exec() 返回 Rejected, 这里也无需再做什么 —
+    // 因为 saveStage 每次都会同步写盘, 所有 "保存过的" 都在 JSON 里了.
+    dlg.exec();
 }

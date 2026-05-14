@@ -16,7 +16,7 @@
 #include <QSpinBox>
 #include <QCheckBox>
 #include <QLineEdit>
-#include <QDialogButtonBox>
+#include <QTime>
 #include <QGroupBox>
 #include <QAbstractSpinBox>
 #include <QApplication>
@@ -145,36 +145,42 @@ void StageConfigDialog::buildUi()
     auto *bottom_row = new QHBoxLayout;
     bottom_row->addStretch(1);
 
-    auto *btns = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel, this);
-    btns->button(QDialogButtonBox::Save)->setText(QStringLiteral("保存"));
-    btns->button(QDialogButtonBox::Cancel)->setText(QStringLiteral("取消"));
-    // CRITICAL: before accepting we have to commit any pending spinbox
-    // edit. QSpinBox::value() returns the last *committed* value, not the
-    // text currently in the line-edit. Without this, "change force_pct
-    // 30 → 50, click 保存" saved 30 because the typed edit hadn't been
-    // interpreted yet.
-    //
-    // Brute-force approach: walk every QAbstractSpinBox (QSpinBox /
-    // QDoubleSpinBox) child of the dialog and call interpretText() on it.
-    // That commits the in-progress text into value() regardless of which
-    // widget currently holds focus.
-    connect(btns, &QDialogButtonBox::accepted, this, [this]() {
+    // 自定义 保存 / 取消, 不用 QDialogButtonBox::Save 是因为后者点击
+    // 后会自动 accept() 关掉对话框. 我们要的是: 保存 → 持久化但保留
+    // 对话框 (操作员可以接着改 / 验证). 取消 → 关掉, 弃改.
+    auto *btn_save  = new QPushButton(QStringLiteral("保存"), this);
+    auto *btn_close = new QPushButton(QStringLiteral("取消"), this);
+    btn_save->setStyleSheet(
+        "QPushButton{ background:#3a8; color:white; font-weight:bold;"
+        " padding:6px 18px; border-radius:4px; }"
+        "QPushButton:hover{ background:#4ba; }");
+    btn_close->setStyleSheet(
+        "QPushButton{ padding:6px 18px; border-radius:4px; }");
+
+    connect(btn_save, &QPushButton::clicked, this, [this, btn_save]() {
+        // Brute-force commit every spinbox: walks all QAbstractSpinBox
+        // descendants and interprets their displayed text into value().
+        // Without this, "type 30 → 50, click 保存" saved 30 because the
+        // typed edit was uncommitted (focus shifted to button before
+        // editingFinished fired on the spinbox).
         const auto spinboxes = this->findChildren<QAbstractSpinBox*>();
         for (auto *sb : spinboxes) sb->interpretText();
-        // clearFocus() on focused widget too — fires editingFinished
-        // signals for line edits / combos any subscriber might be waiting on
         if (auto *fw = QApplication::focusWidget()) fw->clearFocus();
-        // Flush editor fields into steps_[cur_row_]. By now every spinbox's
-        // value() returns the typed number; valueChanged should also have
-        // fired into onParamChanged. Re-running readEditorsTo is the belt-
-        // and-suspenders to make sure steps_ has the final values.
         if (cur_row_ >= 0 && cur_row_ < steps_.size()) {
             readEditorsTo(steps_[cur_row_]);
         }
-        accept();
+        // 让 Tab4 立即写 JSON, 对话框保持打开
+        emit saveStage(steps_);
+        // 临时改文本作为视觉反馈, 1.5s 后恢复
+        btn_save->setText(QStringLiteral("✓ 已保存 ") +
+            QTime::currentTime().toString("HH:mm:ss"));
+        QTimer::singleShot(1500, btn_save,
+            [btn_save]() { btn_save->setText(QStringLiteral("保存")); });
     });
-    connect(btns, &QDialogButtonBox::rejected, this, &QDialog::reject);
-    bottom_row->addWidget(btns);
+    connect(btn_close, &QPushButton::clicked, this, &QDialog::reject);
+
+    bottom_row->addWidget(btn_close);
+    bottom_row->addWidget(btn_save);
 
     btn_execute_ = new QPushButton(QStringLiteral("▶ 执行"), this);
     btn_execute_->setToolTip(QStringLiteral("用当前编辑器里的参数, 立即在真机上执行选中的步骤"));

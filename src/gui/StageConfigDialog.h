@@ -44,6 +44,11 @@ public:
 
     QVector<TaskStep> steps() const { return steps_; }
 
+signals:
+    // 保存 按钮触发. 不再走 QDialog::accept 关窗口的路 — 直接交给 Tab4
+    // 立即写 JSON, 对话框保持打开方便操作员继续编辑/验证.
+    void saveStage(const QVector<TaskStep> &steps);
+
 private slots:
     void onAddStep();
     void onRemoveStep();
