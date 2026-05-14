@@ -758,13 +758,25 @@ void StageConfigDialog::showRow(int row)
 
     switch (s.type) {
         case StepType::MOVE_JOINTS: {
+            // Per-field signal blockers — without these, the chain of
+            // setValue calls fires valueChanged → onParamChanged →
+            // readEditorsTo, which writes editor state (with some fields
+            // still stale from a previous row's view) into steps_[cur_row_].
+            // Brief data corruption window that can persist if anything
+            // else fires onParamChanged before the chain finishes.
+            const QSignalBlocker b0(mj_j_[0]), b1(mj_j_[1]), b2(mj_j_[2]);
+            const QSignalBlocker b3(mj_j_[3]), b4(mj_j_[4]), b5(mj_j_[5]);
+            const QSignalBlocker bs(mj_speed_);
             const auto j = s.params.value("joints").toList();
             for (int i = 0; i < 6; ++i)
                 if (j.size() > i) mj_j_[i]->setValue(j[i].toDouble());
             mj_speed_->setValue(int(s.params.value("speed_ratio", 0.3).toDouble() * 100));
             break;
         }
-        case StepType::MOVE_CARTESIAN:
+        case StepType::MOVE_CARTESIAN: {
+            const QSignalBlocker bx(mc_x_), by(mc_y_), bz(mc_z_);
+            const QSignalBlocker brx(mc_rx_), bry(mc_ry_), brz(mc_rz_);
+            const QSignalBlocker bm(mc_mode_);
             mc_x_->setValue(s.params.value("x_mm").toDouble());
             mc_y_->setValue(s.params.value("y_mm").toDouble());
             mc_z_->setValue(s.params.value("z_mm").toDouble());
@@ -773,10 +785,22 @@ void StageConfigDialog::showRow(int row)
             mc_rz_->setValue(s.params.value("rz_deg").toDouble());
             mc_mode_->setCurrentIndex(s.params.value("mode", "P").toString() == "L" ? 1 : 0);
             break;
-        case StepType::GRIPPER:
+        }
+        case StepType::GRIPPER: {
+            // Per-widget signal blockers — same fix as AIRPORT_RAIL.
+            // Without this, setValue(angle) fires valueChanged →
+            // onParamChanged → readEditorsTo, which reads the STALE
+            // gr_force_ (default 30) and overwrites the just-loaded
+            // saved force in steps_[cur_row_]. The next setValue(force)
+            // restores it, but the brief window where steps_[cur_row_]
+            // has stale data can cause data loss if onParamChanged is
+            // called from any other code path during the window.
+            const QSignalBlocker b_angle(gr_angle_);
+            const QSignalBlocker b_force(gr_force_);
             gr_angle_->setValue(s.params.value("angle_mm").toDouble());
             gr_force_->setValue(s.params.value("force_pct").toInt());
             break;
+        }
         case StepType::AIRPORT_RAIL: {
             // CRITICAL: per-widget signal block. The parent-widget
             // blockSignals(true) in the outer loop doesn't propagate to
