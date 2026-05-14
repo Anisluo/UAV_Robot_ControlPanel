@@ -1356,15 +1356,17 @@ void Tab4TaskConfig::dispatchScriptStep(const TaskStep &step)
             break;
         }
         case StepType::AIRPORT_GRIPPER: {
+            // GPIO 继电器夹爪 (AirportWidget 的 张开/夹紧 按钮也是这条)。
+            // 之前错调成了 airport.lock / airport.release — 那是导轨 1+3
+            // 平台夹紧, 跟继电器没关系。
             const bool open = step.params.value("open").toBool();
             QJsonObject p;
-            p["lock"] = !open;   // platform.lock=true means clamp; open means release
-            rpc_->call(open ? Protocol::Methods::AIRPORT_RELEASE
-                            : Protocol::Methods::AIRPORT_LOCK, p, cb_log_err);
-            duration_ms = 2500;
+            p[Protocol::Fields::OPEN] = open;
+            rpc_->call(Protocol::Methods::AIRPORT_GRIPPER, p, cb_log_err);
+            duration_ms = 800;
             appendLog("info",
-                QString("▶ [%1/%2] AIRPORT_GRIPPER %3%4")
-                    .arg(step_num).arg(total).arg(open ? "释放" : "夹紧").arg(note));
+                QString("▶ [%1/%2] 机场夹爪 (继电器) %3%4")
+                    .arg(step_num).arg(total).arg(open ? "张开" : "夹紧").arg(note));
             break;
         }
         case StepType::AIRPORT_RAIL: {
