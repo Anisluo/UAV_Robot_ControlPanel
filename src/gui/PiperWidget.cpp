@@ -306,34 +306,78 @@ void PiperWidget::buildCartesianTab() {
         "QPushButton:hover{ background:#4689d8; }"
         "QPushButton:disabled{ background:#446; color:#aab; }");
     connect(fix_btn, &QPushButton::clicked, this, [this, fix_btn]() {
-        if (!rpc_) return;
-        const double x  = cart_spins_[0]->value();
-        const double y  = cart_spins_[1]->value();
-        const double z  = cart_spins_[2]->value();
-        const double rx = cart_spins_[3]->value();
-        const double ry0 = cart_spins_[4]->value();
-        const double rz = cart_spins_[5]->value();
-        const QVector<double> ry_seq = { ry0 + 15.0, ry0 - 15.0,
-                                          ry0 + 15.0, ry0 };
-        constexpr int kStepMs = 1200;
-        fix_btn->setEnabled(false);
-        for (int i = 0; i < ry_seq.size(); ++i) {
-            QTimer::singleShot(i * kStepMs, this,
-                [this, x, y, z, rx, ry = ry_seq[i], rz]() {
-                    if (!rpc_) return;
-                    // proc_piper.m_piper_move_cartesian expects UPPERCASE
-                    // X_mm / Y_mm / Z_mm + RX_deg / RY_deg / RZ_deg. The
-                    // lowercase variant (and the legacy roll/pitch/yaw
-                    // names) get rejected as missing required args.
-                    QJsonObject p;
-                    p["X_mm"]   = x;  p["Y_mm"]   = y;  p["Z_mm"]   = z;
-                    p["RX_deg"] = rx; p["RY_deg"] = ry; p["RZ_deg"] = rz;
-                    p["mode"]   = "P";
-                    rpc_->call(QStringLiteral("piper.move_cartesian"), p, nullptr);
-                });
+        if (!rpc_ || !rpc_->isConnected()) {
+            qWarning("[piper] 定点测试: RPC 未连接");
+            return;
         }
-        QTimer::singleShot(ry_seq.size() * kStepMs + 500, fix_btn,
-            [fix_btn]() { fix_btn->setEnabled(true); });
+        // Always pull live pose first — operator might not have clicked
+        // 读取当前位姿. Without this, sending {X:0,Y:0,Z:0} = arm base, IK
+        // refuses, backend silently rejects, button looks broken.
+        fix_btn->setEnabled(false);
+        fix_btn->setText(QStringLiteral("🎯 读取当前位姿..."));
+
+        // Error logger for the actual move calls — surface anything the
+        // backend rejects (e.g. arm in STANDBY after collision).
+        auto err_cb = [](QJsonObject reply) {
+            if (reply.contains("error")) {
+                qWarning("[piper] 定点测试 RPC 错误: %s",
+                    qPrintable(reply.value("error").toString()));
+            }
+        };
+
+        rpc_->call(QStringLiteral("arm.get_pose"), QJsonObject{},
+            [this, fix_btn, err_cb](QJsonObject reply) {
+                // Reply schema: proc_piper returns either {pose:[x,y,z,rx,ry,rz]}
+                // or legacy {x_mm,y_mm,z_mm,roll_deg,pitch_deg,yaw_deg}
+                double v[6] = {0,0,0,0,0,0};
+                const QJsonArray arr = reply.value("pose").toArray();
+                if (arr.size() == 6) {
+                    for (int i = 0; i < 6; ++i) v[i] = arr[i].toDouble();
+                } else {
+                    v[0] = reply.value("x_mm").toDouble();
+                    v[1] = reply.value("y_mm").toDouble();
+                    v[2] = reply.value("z_mm").toDouble();
+                    v[3] = reply.value("roll_deg").toDouble();
+                    v[4] = reply.value("pitch_deg").toDouble();
+                    v[5] = reply.value("yaw_deg").toDouble();
+                }
+                if (std::abs(v[0]) + std::abs(v[1]) + std::abs(v[2]) < 1.0) {
+                    qWarning("[piper] 定点测试: arm.get_pose 返回 (0,0,0), 臂可能未在 CAN_CTRL — 取消");
+                    fix_btn->setText(QStringLiteral("🎯 定点测试 (取消: 无位姿)"));
+                    QTimer::singleShot(2000, fix_btn, [fix_btn]() {
+                        fix_btn->setText(QStringLiteral("🎯 定点测试"));
+                        fix_btn->setEnabled(true);
+                    });
+                    return;
+                }
+                // Reflect the fetched pose into the editor spinboxes so the
+                // operator can see what point we're locking to.
+                for (int i = 0; i < 6; ++i) cart_spins_[i]->setValue(v[i]);
+
+                fix_btn->setText(QStringLiteral("🎯 摆姿态中..."));
+                const double x  = v[0], y = v[1], z = v[2];
+                const double rx = v[3], ry0 = v[4], rz = v[5];
+                const QVector<double> ry_seq = { ry0 + 15.0, ry0 - 15.0,
+                                                  ry0 + 15.0, ry0 };
+                constexpr int kStepMs = 1200;
+                for (int i = 0; i < ry_seq.size(); ++i) {
+                    QTimer::singleShot(i * kStepMs, this,
+                        [this, x, y, z, rx, ry = ry_seq[i], rz, err_cb]() {
+                            if (!rpc_) return;
+                            QJsonObject p;
+                            p["X_mm"]   = x;  p["Y_mm"]   = y;  p["Z_mm"]   = z;
+                            p["RX_deg"] = rx; p["RY_deg"] = ry; p["RZ_deg"] = rz;
+                            p["mode"]   = "P";
+                            rpc_->call(QStringLiteral("piper.move_cartesian"),
+                                       p, err_cb);
+                        });
+                }
+                QTimer::singleShot(ry_seq.size() * kStepMs + 500, fix_btn,
+                    [fix_btn]() {
+                        fix_btn->setText(QStringLiteral("🎯 定点测试"));
+                        fix_btn->setEnabled(true);
+                    });
+            });
     });
     btn_row->addWidget(fix_btn);
 
