@@ -670,43 +670,49 @@ void Tab4TaskConfig::onFlowModeChanged()
 // stalled → manual advance; or (b) flow_step_run_idx_ changed → stale,
 // drop silently; or (c) max_ms timeout fired the timer anyway → also
 // stale-drop.
-void Tab4TaskConfig::pollAirportStall(const QVector<int> &watched_rails,
-                                       const QString &label,
-                                       int session_run_idx)
+void Tab4TaskConfig::pollAirportRailDone(const QVector<int> &watched_rails,
+                                          const QString &mode,
+                                          const QString &label,
+                                          int session_run_idx)
 {
     if (flow_step_run_idx_ != session_run_idx) return;
     if (!rpc_ || !rpc_->isConnected()) return;
     rpc_->call(Protocol::Methods::AIRPORT_GET_STATUS, QJsonObject{},
-        [this, watched_rails, label, session_run_idx](QJsonObject reply) {
+        [this, watched_rails, mode, label, session_run_idx](QJsonObject reply) {
             if (flow_step_run_idx_ != session_run_idx) return;
             const QJsonArray rails = reply.value("rails").toArray();
-            // Map rail index → state for quick lookup.
             int state[3] = {0, 0, 0};
             for (const QJsonValue &v : rails) {
                 const QJsonObject o = v.toObject();
                 const int idx = o.value("index").toInt(-1);
                 if (idx >= 0 && idx < 3) state[idx] = o.value("state").toInt(0);
             }
-            bool all_stalled = !watched_rails.isEmpty();
+            // Wait condition depends on the step's stop_mode:
+            //   stall    → state == 2 (STALLED)
+            //   distance → state != 1 (anything except MOVING; IDLE means
+            //              reached target, STALLED means hit obstacle
+            //              early — both are valid completion).
+            bool all_done = !watched_rails.isEmpty();
             for (int r : watched_rails) {
-                if (r < 0 || r >= 3 || state[r] != 2 /*STALLED*/) {
-                    all_stalled = false; break;
+                if (r < 0 || r >= 3) { all_done = false; break; }
+                if (mode == "distance") {
+                    if (state[r] == 1) { all_done = false; break; }
+                } else {
+                    if (state[r] != 2) { all_done = false; break; }
                 }
             }
-            if (all_stalled) {
+            if (all_done) {
                 appendLog("info",
-                    QString("✓ %1 已堵转, 提前推进").arg(label));
+                    QString("✓ %1 完成, 提前推进").arg(label));
                 if (step_advance_timer_ && step_advance_timer_->isActive()) {
                     step_advance_timer_->stop();
                 }
                 onFlowStepAdvance();
                 return;
             }
-            // Not yet — schedule next poll. 200 ms ≈ 1.5× the gateway
-            // monitor's confirm_hits cadence so we don't hammer.
             QTimer::singleShot(200, this,
-                [this, watched_rails, label, session_run_idx]() {
-                    pollAirportStall(watched_rails, label, session_run_idx);
+                [this, watched_rails, mode, label, session_run_idx]() {
+                    pollAirportRailDone(watched_rails, mode, label, session_run_idx);
                 });
         });
 }
@@ -1420,64 +1426,90 @@ void Tab4TaskConfig::dispatchScriptStep(const TaskStep &step)
             break;
         }
         case StepType::AIRPORT_RAIL: {
-            const QString action = step.params.value("action", "lock").toString();
-            const int speed_rpm  = step.params.value("speed_rpm", 1500).toInt();
-            const int max_ms     = std::max(500, step.params.value("max_ms", 7000).toInt());
-            // STOP → 300 ms → SPEED — pre-clears any latched stall state.
+            const QString action    = step.params.value("action", "lock").toString();
+            const QString stop_mode = step.params.value("stop_mode", "stall").toString();
+            const int speed_rpm     = step.params.value("speed_rpm", 1500).toInt();
+            const double distance   = step.params.value("distance_mm", 50.0).toDouble();
+            const int max_ms        = std::max(500, step.params.value("max_ms", 7000).toInt());
             constexpr int kStallSettleMs = 300;
+
             QString name;
-            QString method;
-            QJsonObject params;
-            QJsonObject stop_params;
             QString stop_method = Protocol::Methods::AIRPORT_STOP_ALL;
-            // Which backend rail indices does this action drive? Used by the
-            // status poll loop to know which rails to wait for STALLED on.
-            QVector<int> watched_rails;
+            QJsonObject stop_params;
+            QVector<int> watched_rails;   // backend indices this step drives
+            int direction = +1;           // +1 forward / -1 backward (for distance mode)
+
             if (action == "release") {
-                method = Protocol::Methods::AIRPORT_RELEASE;
-                params[Protocol::Fields::SPEED_RPM] = speed_rpm;
                 name = "释放(1+3)";
                 watched_rails = {0, 2};
+                direction = -1;           // pair release moves opposite of lock
             } else if (action == "rail2_fwd" || action == "rail2_back") {
-                method = Protocol::Methods::AIRPORT_SET_SPEED;
-                params[Protocol::Fields::RAIL]      = 1;          // backend idx 1 = UI rail 2
-                params[Protocol::Fields::SPEED_RPM] =
-                    (action == "rail2_fwd") ? speed_rpm : -speed_rpm;
                 stop_method = Protocol::Methods::AIRPORT_STOP;
                 stop_params[Protocol::Fields::RAIL] = 1;
                 name = (action == "rail2_fwd") ? "导轨2 前进" : "导轨2 后退";
                 watched_rails = {1};
+                direction = (action == "rail2_fwd") ? +1 : -1;
             } else {
-                method = Protocol::Methods::AIRPORT_LOCK;
-                params[Protocol::Fields::SPEED_RPM] = speed_rpm;
                 name = "锁定(1+3)";
                 watched_rails = {0, 2};
+                direction = +1;
             }
+
             rpc_->call(stop_method, stop_params);
+
+            // Build the actual motion command(s) per stop_mode:
+            //   stall    → set_speed / lock / release   (existing behavior)
+            //   distance → one airport.move_distance call per watched rail
+            //              (signed by direction)
+            const QVector<int> rails_copy = watched_rails;
             QTimer::singleShot(kStallSettleMs, this,
-                [this, method, params, cb_log_err]() {
-                    if (rpc_) rpc_->call(method, params, cb_log_err);
+                [this, action, stop_mode, speed_rpm, distance, direction,
+                 rails_copy, cb_log_err]() {
+                    if (!rpc_) return;
+                    if (stop_mode == "distance") {
+                        const double signed_mm =
+                            std::abs(distance) * (direction >= 0 ? +1.0 : -1.0);
+                        for (int rail_idx : rails_copy) {
+                            QJsonObject p;
+                            p[Protocol::Fields::RAIL]      = rail_idx;
+                            p["distance_mm"]               = signed_mm;
+                            p[Protocol::Fields::SPEED_RPM] = std::abs(speed_rpm);
+                            rpc_->call(Protocol::Methods::AIRPORT_MOVE_DISTANCE, p, cb_log_err);
+                        }
+                    } else {
+                        // stall mode
+                        QJsonObject p;
+                        p[Protocol::Fields::SPEED_RPM] = speed_rpm;
+                        if (action == "release") {
+                            rpc_->call(Protocol::Methods::AIRPORT_RELEASE, p, cb_log_err);
+                        } else if (action == "rail2_fwd" || action == "rail2_back") {
+                            p[Protocol::Fields::RAIL] = 1;
+                            p[Protocol::Fields::SPEED_RPM] =
+                                (action == "rail2_fwd") ? speed_rpm : -speed_rpm;
+                            rpc_->call(Protocol::Methods::AIRPORT_SET_SPEED, p, cb_log_err);
+                        } else {
+                            rpc_->call(Protocol::Methods::AIRPORT_LOCK, p, cb_log_err);
+                        }
+                    }
                 });
-            duration_ms = max_ms + kStallSettleMs;   // safety upper bound
 
-            // Stall-aware advance: poll airport.get_status every 200 ms. The
-            // moment ALL watched rails report STALLED (state == 2), advance
-            // the script step instantly — don't make the operator wait out
-            // the max_ms budget. This is what "must wait for stall before
-            // closing the gripper" means in their flow.
-            // Poll starts AFTER the 300 ms settle so we don't observe the
-            // pre-stop's transient STALLED→IDLE flicker.
+            duration_ms = max_ms + kStallSettleMs;
+
+            // Status poll — advance condition depends on stop_mode.
             const int session_run_idx = flow_step_run_idx_;
-            QTimer::singleShot(kStallSettleMs + 100, this,
-                [this, watched_rails, name, session_run_idx]() {
+            QTimer::singleShot(kStallSettleMs + 200, this,
+                [this, watched_rails, stop_mode, name, session_run_idx]() {
                     if (flow_step_run_idx_ != session_run_idx) return;
-                    pollAirportStall(watched_rails, name, session_run_idx);
+                    pollAirportRailDone(watched_rails, stop_mode, name, session_run_idx);
                 });
 
+            const QString mode_label = (stop_mode == "distance")
+                ? QString("固定 %1mm").arg(std::abs(distance), 0, 'f', 1)
+                : QString("堵转停");
             appendLog("info",
-                QString("▶ [%1/%2] AIRPORT_RAIL %3 @ %4rpm  急停 %6ms + 最长 %5ms (检测堵转推进)%7")
-                    .arg(step_num).arg(total).arg(name)
-                    .arg(speed_rpm).arg(max_ms).arg(kStallSettleMs).arg(note));
+                QString("▶ [%1/%2] AIRPORT_RAIL %3 @ %4rpm  %5  (%6ms 急停 + 最长 %7ms)%8")
+                    .arg(step_num).arg(total).arg(name).arg(speed_rpm)
+                    .arg(mode_label).arg(kStallSettleMs).arg(max_ms).arg(note));
             break;
         }
         case StepType::MOVE_CARTESIAN:

@@ -245,10 +245,21 @@ void StageConfigDialog::buildEditPanels()
         ar_action_->addItem(QStringLiteral("机场夹爪导轨 前进 (导轨 2)"), "rail2_fwd");
         ar_action_->addItem(QStringLiteral("机场夹爪导轨 后退 (导轨 2)"), "rail2_back");
 
+        ar_stop_mode_ = new QComboBox(w);
+        ar_stop_mode_->addItem(QStringLiteral("堵转停 (撞死自动停)"),  "stall");
+        ar_stop_mode_->addItem(QStringLiteral("固定距离 (走 N mm)"),    "distance");
+
         ar_speed_ = new QSpinBox(w);
         ar_speed_->setRange(50, 3000);
         ar_speed_->setValue(1500);
         ar_speed_->setSuffix("rpm");
+
+        ar_distance_ = new QDoubleSpinBox(w);
+        ar_distance_->setRange(0.0, 2000.0);
+        ar_distance_->setDecimals(1);
+        ar_distance_->setSingleStep(1.0);
+        ar_distance_->setValue(50.0);
+        ar_distance_->setSuffix("mm");
 
         ar_max_ms_ = new QSpinBox(w);
         ar_max_ms_->setRange(1000, 60000);
@@ -256,22 +267,40 @@ void StageConfigDialog::buildEditPanels()
         ar_max_ms_->setSingleStep(500);
         ar_max_ms_->setSuffix("ms");
 
+        // Distance field is only meaningful in distance mode — disable
+        // greyed-out when stall is selected (visual cue + prevents
+        // accidental edits that don't take effect).
+        auto refreshAirportRailFields = [this]() {
+            const bool dist = (ar_stop_mode_->currentData().toString() == "distance");
+            ar_distance_->setEnabled(dist);
+        };
+
         connect(ar_action_, QOverload<int>::of(&QComboBox::currentIndexChanged),
                 this, &StageConfigDialog::onParamChanged);
+        connect(ar_stop_mode_, QOverload<int>::of(&QComboBox::currentIndexChanged),
+                this, [this, refreshAirportRailFields]() {
+            refreshAirportRailFields();
+            onParamChanged();
+        });
         connect(ar_speed_, QOverload<int>::of(&QSpinBox::valueChanged),
+                this, &StageConfigDialog::onParamChanged);
+        connect(ar_distance_, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
                 this, &StageConfigDialog::onParamChanged);
         connect(ar_max_ms_, QOverload<int>::of(&QSpinBox::valueChanged),
                 this, &StageConfigDialog::onParamChanged);
 
         f->addRow(QStringLiteral("动作"), ar_action_);
+        f->addRow(QStringLiteral("停止方式"), ar_stop_mode_);
         f->addRow(QStringLiteral("速度"), ar_speed_);
+        f->addRow(QStringLiteral("距离"), ar_distance_);
         f->addRow(QStringLiteral("最长等待"), ar_max_ms_);
         f->addRow(new QLabel(
-            QStringLiteral("<i>锁定/释放: 导轨 1+3 联动 (平台夹紧)。<br>"
-                           "导轨 2: 机场夹爪导轨 前进/后退。<br>"
-                           "proc_gateway 检测到堵转 (status 0x04/0x08)<br>"
-                           "或读 CAN 失败 8 次自动停。</i>"),
+            QStringLiteral("<i>堵转停: 电机一直走, 检测到 status 0x04/0x08<br>"
+                           "或读 CAN 失败 8 次自动停。<br>"
+                           "固定距离: 走配置的 mm 数停, 用 pulse 计数;<br>"
+                           "中途撞死也会停。最长等待是安全兜底。</i>"),
             w));
+        refreshAirportRailFields();
         editor_stack_->insertWidget(int(StepType::AIRPORT_RAIL), w);
     }
 
@@ -423,9 +452,11 @@ void StageConfigDialog::onAddStep()
             s.params["force_pct"] = 30;
             break;
         case StepType::AIRPORT_RAIL:
-            s.params["action"]    = "lock";
-            s.params["speed_rpm"] = 1500;
-            s.params["max_ms"]    = 7000;
+            s.params["action"]      = "lock";
+            s.params["stop_mode"]   = "stall";
+            s.params["speed_rpm"]   = 1500;
+            s.params["distance_mm"] = 50.0;
+            s.params["max_ms"]      = 7000;
             break;
         case StepType::AIRPORT_GRIPPER:
             s.params["open"] = true;
@@ -539,10 +570,18 @@ void StageConfigDialog::showRow(int row)
             break;
         case StepType::AIRPORT_RAIL: {
             const QString action = s.params.value("action", "lock").toString();
-            int idx = ar_action_->findData(action);
-            if (idx < 0) idx = 0;
-            ar_action_->setCurrentIndex(idx);
+            int aidx = ar_action_->findData(action);
+            if (aidx < 0) aidx = 0;
+            ar_action_->setCurrentIndex(aidx);
+
+            const QString stop_mode = s.params.value("stop_mode", "stall").toString();
+            int sidx = ar_stop_mode_->findData(stop_mode);
+            if (sidx < 0) sidx = 0;
+            ar_stop_mode_->setCurrentIndex(sidx);
+            ar_distance_->setEnabled(stop_mode == "distance");
+
             ar_speed_->setValue(s.params.value("speed_rpm", 1500).toInt());
+            ar_distance_->setValue(s.params.value("distance_mm", 50.0).toDouble());
             ar_max_ms_->setValue(s.params.value("max_ms", 7000).toInt());
             break;
         }
@@ -592,9 +631,11 @@ void StageConfigDialog::readEditorsTo(TaskStep &s)
             s.params["force_pct"] = gr_force_->value();
             break;
         case StepType::AIRPORT_RAIL:
-            s.params["action"]    = ar_action_->currentData().toString();
-            s.params["speed_rpm"] = ar_speed_->value();
-            s.params["max_ms"]    = ar_max_ms_->value();
+            s.params["action"]      = ar_action_->currentData().toString();
+            s.params["stop_mode"]   = ar_stop_mode_->currentData().toString();
+            s.params["speed_rpm"]   = ar_speed_->value();
+            s.params["distance_mm"] = ar_distance_->value();
+            s.params["max_ms"]      = ar_max_ms_->value();
             break;
         case StepType::AIRPORT_GRIPPER:
             s.params["open"] = ag_open_->isChecked();

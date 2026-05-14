@@ -43,14 +43,20 @@ struct TaskStep {
 //                    mode: "P" | "L"  }
 // GRIPPER          { angle_mm: 0..70, force_pct: 0..100 }
 // AIRPORT_RAIL     { action: "lock"|"release"|"rail2_fwd"|"rail2_back",
-//                    speed_rpm: int, max_ms: int }
-//                  lock/release  → airport.lock / airport.release (rails 1+3
-//                                  pair, the platform clamp).
-//                  rail2_fwd/back → airport.set_speed (rail=1, ±speed_rpm).
-//                                   Rail 2 is the gripper-rail; backend
-//                                   monitor_rail_until_stall cuts the motor
-//                                   on stall (status 0x04/0x08).
-//                  max_ms = GUI-side upper bound before advancing.
+//                    stop_mode: "stall"|"distance" (default "stall"),
+//                    speed_rpm: int,
+//                    distance_mm: float (only used when stop_mode=distance),
+//                    max_ms: int }
+//                  stall mode:
+//                    lock/release → airport.lock / .release (pair clamp).
+//                    rail2_fwd/back → airport.set_speed (rail=1, ±rpm).
+//                    Backend stall monitor cuts the motor on jam.
+//                  distance mode:
+//                    Calls airport.move_distance (open-loop position cmd)
+//                    one or two rails. Motor self-stops on its pulse
+//                    counter. Per-rail completion monitor flips state
+//                    IDLE on reach / STALLED on early collision.
+//                  max_ms = GUI-side safety upper bound for both modes.
 // AIRPORT_GRIPPER  { open: bool }
 // WAIT_DETECT_UAV  { present: bool, timeout_ms: int }
 //                  (present=true → wait until detected; false → wait until gone)
