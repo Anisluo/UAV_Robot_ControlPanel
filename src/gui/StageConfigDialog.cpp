@@ -267,12 +267,26 @@ void StageConfigDialog::buildEditPanels()
         ar_max_ms_->setSingleStep(500);
         ar_max_ms_->setSuffix("ms");
 
-        // Distance field is only meaningful in distance mode — disable
-        // greyed-out when stall is selected (visual cue + prevents
-        // accidental edits that don't take effect).
-        auto refreshAirportRailFields = [this]() {
+        f->addRow(QStringLiteral("动作"), ar_action_);
+        f->addRow(QStringLiteral("停止方式"), ar_stop_mode_);
+        f->addRow(QStringLiteral("速度"), ar_speed_);
+        f->addRow(QStringLiteral("距离"), ar_distance_);
+        f->addRow(QStringLiteral("最长等待"), ar_max_ms_);
+        f->addRow(new QLabel(
+            QStringLiteral("<i>堵转停: 电机一直走, 检测到 status 0x04/0x08<br>"
+                           "或读 CAN 失败 8 次自动停。<br>"
+                           "固定距离: 走配置的 mm 数停, 用 pulse 计数;<br>"
+                           "中途撞死也会停。最长等待是安全兜底。</i>"),
+            w));
+
+        // Distance row is only meaningful in distance mode — hide it
+        // entirely when stop_mode = stall instead of greying out (cleaner
+        // visual: operator only sees the fields that actually apply).
+        // QFormLayout::setRowVisible(QWidget*, bool) needs Qt 6.4+; we're
+        // on 6.11.
+        auto refreshAirportRailFields = [this, f]() {
             const bool dist = (ar_stop_mode_->currentData().toString() == "distance");
-            ar_distance_->setEnabled(dist);
+            f->setRowVisible(ar_distance_, dist);
         };
 
         connect(ar_action_, QOverload<int>::of(&QComboBox::currentIndexChanged),
@@ -289,17 +303,6 @@ void StageConfigDialog::buildEditPanels()
         connect(ar_max_ms_, QOverload<int>::of(&QSpinBox::valueChanged),
                 this, &StageConfigDialog::onParamChanged);
 
-        f->addRow(QStringLiteral("动作"), ar_action_);
-        f->addRow(QStringLiteral("停止方式"), ar_stop_mode_);
-        f->addRow(QStringLiteral("速度"), ar_speed_);
-        f->addRow(QStringLiteral("距离"), ar_distance_);
-        f->addRow(QStringLiteral("最长等待"), ar_max_ms_);
-        f->addRow(new QLabel(
-            QStringLiteral("<i>堵转停: 电机一直走, 检测到 status 0x04/0x08<br>"
-                           "或读 CAN 失败 8 次自动停。<br>"
-                           "固定距离: 走配置的 mm 数停, 用 pulse 计数;<br>"
-                           "中途撞死也会停。最长等待是安全兜底。</i>"),
-            w));
         refreshAirportRailFields();
         editor_stack_->insertWidget(int(StepType::AIRPORT_RAIL), w);
     }
@@ -578,11 +581,16 @@ void StageConfigDialog::showRow(int row)
             int sidx = ar_stop_mode_->findData(stop_mode);
             if (sidx < 0) sidx = 0;
             ar_stop_mode_->setCurrentIndex(sidx);
-            ar_distance_->setEnabled(stop_mode == "distance");
 
             ar_speed_->setValue(s.params.value("speed_rpm", 1500).toInt());
             ar_distance_->setValue(s.params.value("distance_mm", 50.0).toDouble());
             ar_max_ms_->setValue(s.params.value("max_ms", 7000).toInt());
+
+            // Re-apply row visibility after setCurrentIndex (signal blocked
+            // during showRow so the lambda above didn't fire).
+            if (auto *form = qobject_cast<QFormLayout*>(ar_distance_->parentWidget()->layout())) {
+                form->setRowVisible(ar_distance_, stop_mode == "distance");
+            }
             break;
         }
         case StepType::AIRPORT_GRIPPER:
