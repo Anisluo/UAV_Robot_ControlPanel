@@ -240,10 +240,13 @@ void StageConfigDialog::buildEditPanels()
                 QTimer::singleShot(i * kStepMs, this,
                     [this, x, y, z, rx, ry = ry_seq[i], rz]() {
                         if (!rpc_) return;
+                        // piper.move_cartesian needs UPPERCASE X_mm/Y_mm/Z_mm
+                        // + RX_deg/RY_deg/RZ_deg (see m_piper_move_cartesian
+                        // signature in proc_piper.py).
                         QJsonObject p;
-                        p["x_mm"]  = x;  p["y_mm"]  = y;  p["z_mm"]  = z;
-                        p["rx_deg"] = rx; p["ry_deg"] = ry; p["rz_deg"] = rz;
-                        p["mode"]  = "P";
+                        p["X_mm"]   = x;  p["Y_mm"]   = y;  p["Z_mm"]   = z;
+                        p["RX_deg"] = rx; p["RY_deg"] = ry; p["RZ_deg"] = rz;
+                        p["mode"]   = "P";
                         rpc_->call(QStringLiteral("piper.move_cartesian"), p);
                     });
             }

@@ -1636,10 +1636,14 @@ void Tab4TaskConfig::dispatchScriptStep(const TaskStep &step)
             const double rz = step.params.value("rz_deg").toDouble();
             const int duration = std::max(200, step.params.value("duration_ms", 5000).toInt());
 
+            // proc_piper.m_piper_move_cartesian expects UPPERCASE X_mm/Y_mm
+            // /Z_mm + RX_deg/RY_deg/RZ_deg (lowercase rejects as missing
+            // args). The legacy proc_arm methods used lowercase + roll/pitch
+            // /yaw, which is a different path.
             QJsonObject p;
-            p["x_mm"] = x;   p["y_mm"] = y;   p["z_mm"] = z;
-            p["rx_deg"] = rx; p["ry_deg"] = ry; p["rz_deg"] = rz;
-            p["mode"]  = "P";   // point-to-point (joint-space interpolation OK)
+            p["X_mm"]   = x;  p["Y_mm"]   = y;  p["Z_mm"]   = z;
+            p["RX_deg"] = rx; p["RY_deg"] = ry; p["RZ_deg"] = rz;
+            p["mode"]   = "P";
             rpc_->call(Protocol::Methods::PIPER_MOVE_CARTESIAN, p, cb_log_err);
 
             // duration_ms = travel-to-point time + the user's hold time.

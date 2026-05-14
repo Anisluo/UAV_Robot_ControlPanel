@@ -321,9 +321,14 @@ void PiperWidget::buildCartesianTab() {
             QTimer::singleShot(i * kStepMs, this,
                 [this, x, y, z, rx, ry = ry_seq[i], rz]() {
                     if (!rpc_) return;
+                    // proc_piper.m_piper_move_cartesian expects UPPERCASE
+                    // X_mm / Y_mm / Z_mm + RX_deg / RY_deg / RZ_deg. The
+                    // lowercase variant (and the legacy roll/pitch/yaw
+                    // names) get rejected as missing required args.
                     QJsonObject p;
-                    p["x_mm"]      = x;  p["y_mm"]      = y;  p["z_mm"]      = z;
-                    p["roll_deg"]  = rx; p["pitch_deg"] = ry; p["yaw_deg"]   = rz;
+                    p["X_mm"]   = x;  p["Y_mm"]   = y;  p["Z_mm"]   = z;
+                    p["RX_deg"] = rx; p["RY_deg"] = ry; p["RZ_deg"] = rz;
+                    p["mode"]   = "P";
                     rpc_->call(QStringLiteral("piper.move_cartesian"), p, nullptr);
                 });
         }
