@@ -4,87 +4,59 @@
 #include <QPaintEvent>
 #include <QFont>
 #include <QFontMetrics>
+#include <QVBoxLayout>
+#include <QHBoxLayout>
+#include <QPushButton>
+#include <QLabel>
 #include <cmath>
 
-MeshMapWidget::MeshMapWidget(QWidget *parent)
-    : QGroupBox("无线通信网络", parent)
+// ─── MeshCanvas ───────────────────────────────────────────────────────────────
+
+MeshCanvas::MeshCanvas(QWidget *parent)
+    : QWidget(parent)
 {
-    setMinimumHeight(240);
-    setMaximumHeight(240);
-    populateDemoNodes();
+    setMinimumHeight(200);
 }
 
-void MeshMapWidget::updateNodes(const QList<MeshNode> &nodes)
+void MeshCanvas::setNodes(const QList<MeshNode> &nodes)
 {
     nodes_ = nodes;
     update();
 }
 
-void MeshMapWidget::populateDemoNodes()
+QPointF MeshCanvas::nodePos(const MeshNode &n) const
 {
-    nodes_.clear();
-
-    // Placeholder mesh layout:
-    // .101 = host / gateway
-    // .102~.106 = UAV nodes
-    static const struct { int id; float x; float y; } kLayout[] = {
-        { 101, 0.50f, 0.18f },
-        { 102, 0.14f, 0.58f },
-        { 103, 0.32f, 0.78f },
-        { 104, 0.50f, 0.60f },
-        { 105, 0.68f, 0.78f },
-        { 106, 0.86f, 0.58f },
-    };
-    for (const auto &k : kLayout) {
-        MeshNode n;
-        n.id        = k.id;
-        n.x         = k.x;
-        n.y         = k.y;
-        n.rssi      = 0;
-        n.reachable = false;
-        nodes_ << n;
-    }
-}
-
-QPointF MeshMapWidget::nodePos(const MeshNode &n) const
-{
-    // Map canvas = inside the group box content area
-    int margin = 30;
+    int margin = 24;
     int cx = static_cast<int>(margin + n.x * (width()  - margin * 2));
     int cy = static_cast<int>(margin + n.y * (height() - margin * 2));
     return QPointF(cx, cy);
 }
 
-int MeshMapWidget::rssiToThickness(int rssi) const
+int MeshCanvas::rssiToThickness(int rssi) const
 {
-    // rssi: -30 (strong) to -90 (weak)
-    // clamp and map to 1..4
     int clamped = qMax(-90, qMin(-30, rssi));
-    double t = (double)(clamped + 30) / (-90.0 + 30.0); // 0=strong, 1=weak
+    double t = (double)(clamped + 30) / (-90.0 + 30.0);
     return static_cast<int>(1 + (1.0 - t) * 3.0);
 }
 
-QColor MeshMapWidget::rssiToColor(int rssi) const
+QColor MeshCanvas::rssiToColor(int rssi) const
 {
     int clamped = qMax(-90, qMin(-30, rssi));
-    double t = (double)(clamped + 30) / (-90.0 + 30.0); // 0=strong(cyan), 1=weak(gray)
+    double t = (double)(clamped + 30) / (-90.0 + 30.0);
     int r = static_cast<int>(0x00 + t * (0x55 - 0x00));
     int g = static_cast<int>(0xc8 + t * (0x57 - 0xc8));
     int b = static_cast<int>(0xd7 + t * (0x70 - 0xd7));
     return QColor(r, g, b);
 }
 
-void MeshMapWidget::paintEvent(QPaintEvent *event)
+void MeshCanvas::paintEvent(QPaintEvent *event)
 {
-    // Draw the group box frame first
-    QGroupBox::paintEvent(event);
-
+    Q_UNUSED(event);
     if (nodes_.isEmpty()) return;
 
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing);
 
-    // Draw the static mesh skeleton first so all 6 nodes always appear connected.
     auto drawSkeletonLink = [&p, this](const MeshNode &a, const MeshNode &b) {
         QPen pen(QColor(0x66, 0x6b, 0x7f, 180), 1.0);
         pen.setStyle(Qt::DashLine);
@@ -102,9 +74,7 @@ void MeshMapWidget::paintEvent(QPaintEvent *event)
 
     if (hostNode) {
         for (const MeshNode &n : nodes_) {
-            if (n.id == 101) {
-                continue;
-            }
+            if (n.id == 101) continue;
             drawSkeletonLink(*hostNode, n);
         }
     }
@@ -118,17 +88,12 @@ void MeshMapWidget::paintEvent(QPaintEvent *event)
         }
     }
 
-    // Draw host-to-node links for active mesh nodes.
     if (hostNode && hostNode->reachable) {
         for (const MeshNode &n : nodes_) {
-            if (n.id == 101 || !n.reachable) {
-                continue;
-            }
+            if (n.id == 101 || !n.reachable) continue;
 
             int avgRssi = (hostNode->rssi + n.rssi) / 2;
-            if (avgRssi == 0) {
-                avgRssi = -50;
-            }
+            if (avgRssi == 0) avgRssi = -50;
             int thickness = rssiToThickness(avgRssi);
             QColor lineColor = rssiToColor(avgRssi);
             lineColor.setAlpha(170);
@@ -139,7 +104,6 @@ void MeshMapWidget::paintEvent(QPaintEvent *event)
         }
     }
 
-    // Draw lateral links between active UAV nodes for a mesh feel.
     for (int i = 0; i < nodes_.size(); ++i) {
         for (int j = i + 1; j < nodes_.size(); ++j) {
             const MeshNode &a = nodes_[i];
@@ -148,9 +112,7 @@ void MeshMapWidget::paintEvent(QPaintEvent *event)
             if (!a.reachable || !b.reachable) continue;
 
             int avgRssi = (a.rssi + b.rssi) / 2;
-            if (avgRssi == 0) {
-                avgRssi = -55;
-            }
+            if (avgRssi == 0) avgRssi = -55;
             int thickness = rssiToThickness(avgRssi);
             QColor lineColor = rssiToColor(avgRssi);
             lineColor.setAlpha(80);
@@ -161,7 +123,6 @@ void MeshMapWidget::paintEvent(QPaintEvent *event)
         }
     }
 
-    // Draw nodes
     QFont labelFont;
     labelFont.setFamily("Consolas");
     labelFont.setPointSize(8);
@@ -173,15 +134,13 @@ void MeshMapWidget::paintEvent(QPaintEvent *event)
     for (const MeshNode &n : nodes_) {
         QPointF pos = nodePos(n);
 
-        // Node circle
-        QColor nodeColor = n.reachable ? QColor(0x4c, 0xaf, 0x50) : QColor(0x55, 0x57, 0x70);
+        QColor nodeColor   = n.reachable ? QColor(0x4c, 0xaf, 0x50) : QColor(0x55, 0x57, 0x70);
         QColor borderColor = n.reachable ? QColor(0x98, 0xe2, 0x8d) : QColor(0x35, 0x36, 0x50);
 
         p.setPen(QPen(borderColor, 1.5));
         p.setBrush(nodeColor);
         p.drawEllipse(pos, NODE_RADIUS, NODE_RADIUS);
 
-        // Node ID label — for IDs >= 100 show as ".101", else "N1"
         QString label = (n.id >= 100)
                         ? QString(".%1").arg(n.id)
                         : QString("N%1").arg(n.id);
@@ -201,7 +160,6 @@ void MeshMapWidget::paintEvent(QPaintEvent *event)
         p.setPen(n.reachable ? QColor(0x98, 0xe2, 0x8d) : QColor(0x7f, 0x8a, 0xa3));
         p.drawText(sx, sy, subLabel);
 
-        // RSSI label (omit when rssi == 0, e.g. ping-only nodes)
         if (n.reachable && n.rssi != 0) {
             QString rssiStr = QString("%1").arg(n.rssi);
             QRect rBound = fm.boundingRect(rssiStr);
@@ -211,4 +169,166 @@ void MeshMapWidget::paintEvent(QPaintEvent *event)
             p.drawText(rx, ry, rssiStr);
         }
     }
+}
+
+// ─── MeshMapWidget ────────────────────────────────────────────────────────────
+
+MeshMapWidget::MeshMapWidget(QWidget *parent)
+    : QGroupBox("无线通信网络", parent)
+    , sim_active_(false)
+{
+    setMinimumHeight(330);
+
+    auto *layout = new QVBoxLayout(this);
+    layout->setContentsMargins(8, 18, 8, 8);
+    layout->setSpacing(6);
+
+    canvas_ = new MeshCanvas(this);
+    layout->addWidget(canvas_, /*stretch=*/1);
+
+    auto *controlsRow = new QHBoxLayout;
+    controlsRow->setSpacing(8);
+    sim_button_ = new QPushButton("Scan", this);
+    sim_button_->setCheckable(true);
+    sim_button_->setCursor(Qt::PointingHandCursor);
+    sim_button_->setFixedWidth(80);
+    connect(sim_button_, &QPushButton::clicked,
+            this, &MeshMapWidget::onSimulateToggled);
+    controlsRow->addWidget(sim_button_);
+
+    param_label_ = new QLabel(this);
+    param_label_->setTextFormat(Qt::PlainText);
+    QFont mono("Consolas");
+    mono.setPointSize(9);
+    param_label_->setFont(mono);
+    param_label_->setStyleSheet("color: #7f8aa3;");
+    param_label_->setText("点击 “Scan” 扫描在线节点");
+    param_label_->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+    controlsRow->addWidget(param_label_, /*stretch=*/1);
+    layout->addLayout(controlsRow);
+
+    populateDemoNodes();
+    canvas_->setNodes(idle_nodes_);
+}
+
+void MeshMapWidget::updateNodes(const QList<MeshNode> &nodes)
+{
+    last_real_nodes_ = nodes;
+    if (sim_active_) {
+        // Sim overrides live ping data; remember it for when sim toggles off.
+        return;
+    }
+    canvas_->setNodes(nodes);
+    refreshParamLabel(nodes, /*simActive=*/false);
+}
+
+void MeshMapWidget::populateDemoNodes()
+{
+    idle_nodes_.clear();
+    static const struct { int id; float x; float y; } kLayout[] = {
+        { 101, 0.50f, 0.18f },
+        { 102, 0.14f, 0.58f },
+        { 103, 0.32f, 0.78f },
+        { 104, 0.50f, 0.60f },
+        { 105, 0.68f, 0.78f },
+        { 106, 0.86f, 0.58f },
+    };
+    for (const auto &k : kLayout) {
+        MeshNode n;
+        n.id        = k.id;
+        n.x         = k.x;
+        n.y         = k.y;
+        n.rssi      = 0;
+        n.reachable = false;
+        idle_nodes_ << n;
+    }
+}
+
+QList<MeshNode> MeshMapWidget::buildSimulationNodes() const
+{
+    // Light up 4 UAV nodes: .102/.103/.104/.105. HOST .101 stays dark in
+    // sim mode (it has no drone telemetry card; lighting it would give the
+    // mesh map a 5-node count that contradicts the "4 nodes" demo story).
+    static const struct { int id; int rssi; } kLit[] = {
+        { 102, -45 },
+        { 103, -58 },
+        { 104, -52 },
+        { 105, -63 },
+    };
+
+    QList<MeshNode> out = idle_nodes_;
+    for (MeshNode &n : out) {
+        n.rssi = 0;
+        n.reachable = false;
+        for (const auto &lit : kLit) {
+            if (lit.id == n.id) {
+                n.rssi = lit.rssi;
+                n.reachable = true;
+                break;
+            }
+        }
+    }
+    return out;
+}
+
+void MeshMapWidget::onSimulateToggled()
+{
+    sim_active_ = sim_button_->isChecked();
+    sim_button_->setText(sim_active_ ? "Stop" : "Scan");
+
+    if (sim_active_) {
+        QList<MeshNode> simNodes = buildSimulationNodes();
+        canvas_->setNodes(simNodes);
+        refreshParamLabel(simNodes, /*simActive=*/true);
+        emit simulationToggled(true, simNodes);
+    } else {
+        // Restore last real ping data if any, else fall back to the
+        // inactive skeleton.
+        const QList<MeshNode> &restore =
+            last_real_nodes_.isEmpty() ? idle_nodes_ : last_real_nodes_;
+        canvas_->setNodes(restore);
+        refreshParamLabel(restore, /*simActive=*/false);
+        emit simulationToggled(false, restore);
+    }
+}
+
+void MeshMapWidget::refreshParamLabel(const QList<MeshNode> &nodes, bool simActive)
+{
+    if (!simActive) {
+        param_label_->setStyleSheet("color: #7f8aa3;");
+        param_label_->setText(last_real_nodes_.isEmpty()
+                              ? "点击 “Scan” 扫描在线节点"
+                              : "实时 ping 数据：等待下一周期刷新…");
+        return;
+    }
+
+    // Per-node simulated link parameters keyed by ID — kept in sync with
+    // buildSimulationNodes(). Tx rate is mock 802.11ac-ish data; channel
+    // fixed to 36 (5 GHz) for a coherent mesh story.
+    struct SimParam { int id; int txMbps; double lossPct; int channel; };
+    static const SimParam kParams[] = {
+        { 102, 130,  0.8, 36 },
+        { 103,  86,  1.6, 36 },
+        { 104, 108,  1.0, 36 },
+        { 105,  72,  2.2, 36 },
+    };
+
+    QStringList lines;
+    lines << "Mesh 链路:";
+    for (const MeshNode &n : nodes) {
+        if (!n.reachable) continue;
+        const SimParam *param = nullptr;
+        for (const auto &p : kParams) {
+            if (p.id == n.id) { param = &p; break; }
+        }
+        if (!param) continue;
+        lines << QString("  .%1  UAV   RSSI %2 dBm  Tx %3 Mbps  Loss %4%  Ch %5")
+                     .arg(n.id)
+                     .arg(n.rssi, 4)
+                     .arg(param->txMbps, 3)
+                     .arg(QString::number(param->lossPct, 'f', 1), 4)
+                     .arg(param->channel);
+    }
+    param_label_->setStyleSheet("color: #98e28d;");
+    param_label_->setText(lines.join('\n'));
 }

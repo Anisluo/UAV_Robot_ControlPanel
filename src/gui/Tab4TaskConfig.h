@@ -68,6 +68,14 @@ private slots:
     void onFlowReset();
     void onFlowExport();              // 整套 9 stage 任务脚本另存为 JSON
     void onFlowImport();              // 从 JSON 加载, 替换当前脚本
+    // Phase-only shortcuts on the flow bar:
+    //   取电: 跑 phase1 (stage 1..5 == idx 0..4)
+    //   换电: 跑 phase2 (stage 6..9 == idx 5..8)
+    // 共用实机模式那套 dispatchScriptStep + step_advance_timer 机制,
+    // 关键差别是 flow_real_end_stage_idx_ 给定上界 (含), 跑到它就停而
+    // 不是继续到 stage 9.
+    void onFlowPickup();              // 取电: phase1, stage idx 0..4
+    void onFlowSwap();                // 换电: phase2, stage idx 5..8
     void onFlowSimTick();             // 30 Hz interpolation when sim is running
     void onSwapStatusPoll();          // 2 Hz polling in real mode
     void onFlowStationClicked(QString state_id);
@@ -165,6 +173,9 @@ private:
     // 的脚本跑完后, onFlowStepAdvance 自动加载下一个 stage 而不是收摊。
     bool             flow_real_sequential_  = false;
     int              flow_real_stage_idx_   = -1;   // 当前跑第几个 stage (0..8)
+    // 实机串行模式可选 "跑到某个 stage 就停" 的上界 (含). -1 = 跑到底.
+    // 取电按钮设 4, 换电按钮设 8, ▶ 开始走老路径设 -1.
+    int              flow_real_end_stage_idx_ = -1;
     QVector<float>   flow_step_prev_joints_;       // last commanded joints, for dynamic step_ms calc
     // When the selected stage has a recorded script in stage_scripts_,
     // single-step mode walks THE SCRIPT (every type — MOVE_JOINTS,
@@ -178,6 +189,8 @@ private:
     QPushButton    *btn_flow_reset_   = nullptr;
     QPushButton    *btn_flow_export_  = nullptr;   // 导出全部 9 stage 脚本到 JSON
     QPushButton    *btn_flow_import_  = nullptr;   // 加载 JSON 替换当前脚本
+    QPushButton    *btn_flow_pickup_  = nullptr;   // 取电: phase1 (stage 1..5)
+    QPushButton    *btn_flow_swap_    = nullptr;   // 换电: phase2 (stage 6..9)
     QLabel         *flow_status_label_= nullptr;
 
     // Flow simulator (sim mode) — walks a precomputed playlist.

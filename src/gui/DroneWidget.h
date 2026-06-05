@@ -28,6 +28,10 @@ public:
 public slots:
     void updateMeshNodes(const QList<MeshNode> &nodes);
     void setDefaultTargetHost(const QString &host);
+    // Mesh-widget 仿真 button: when active, fill .102~.105 with mock
+    // telemetry and freeze the live RPC refresh path so simulated values
+    // aren't overwritten on the next periodic poll.
+    void setSimulationTelemetry(bool active, const QList<MeshNode> &nodes);
 
 private slots:
     void refreshDroneStates();
@@ -74,6 +78,8 @@ private:
     QLabel      *status_label_;
     QLabel      *refresh_label_;
     QPushButton *btn_refresh_;
+
+    bool         sim_active_{false};
 
     QTimer      *refresh_timer_;
     QUdpSocket  *udp_socket_;

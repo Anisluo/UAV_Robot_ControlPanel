@@ -359,9 +359,12 @@ void PiperWidget::buildCartesianTab() {
                 fix_btn->setText(QStringLiteral("🎯 摆姿态中..."));
                 const double x  = v[0], y = v[1], z = v[2];
                 const double rx = v[3], ry0 = v[4], rz = v[5];
+                // ±15° + 2500ms: 之前 ±5° 时 Piper 控制器在死区/量化范围内
+                // hunting (反复微调) → 看起来还是抖. 加回大幅度但保留长间隔,
+                // 确保单帧是干净的大位移, 走完才反向.
                 const QVector<double> ry_seq = { ry0 + 15.0, ry0 - 15.0,
                                                   ry0 + 15.0, ry0 };
-                constexpr int kStepMs = 1200;
+                constexpr int kStepMs = 2500;   // 单帧走完留足余量
                 for (int i = 0; i < ry_seq.size(); ++i) {
                     QTimer::singleShot(i * kStepMs, this,
                         [this, x, y, z, rx, ry = ry_seq[i], rz, err_cb]() {

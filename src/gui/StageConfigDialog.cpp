@@ -281,10 +281,12 @@ void StageConfigDialog::buildEditPanels()
             const double rx = mc_rx_->value();
             const double ry0 = mc_ry_->value();
             const double rz = mc_rz_->value();
-            // RY 来回扫 +15 / -15, 大约 5 秒走完一圈
+            // ±15° + 2500ms: ±5° 时 Piper 控制器在死区/量化范围内 hunting
+            // (反复微调) → 看起来还是抖. 加回大幅度但保留长间隔, 单帧是
+            // 干净的大位移, 走完才反向.
             const QVector<double> ry_seq = { ry0 + 15.0, ry0 - 15.0,
                                               ry0 + 15.0, ry0 };
-            constexpr int kStepMs = 1200;   // 单段允许时长
+            constexpr int kStepMs = 2500;   // 单帧走完留足余量
             btn_fix->setEnabled(false);
             for (int i = 0; i < ry_seq.size(); ++i) {
                 QTimer::singleShot(i * kStepMs, this,
@@ -307,7 +309,7 @@ void StageConfigDialog::buildEditPanels()
         f->addRow(new QLabel(
             QStringLiteral("<i>定点测试: 点击后臂会在 RY ±15° 之间来回扫 4 次,"
                            "TCP (X,Y,Z) 始终锁在配置位置. 看关节角度变化 + TCP"
-                           "在同一点就说明 OK. 大约 5 秒.</i>"),
+                           "在同一点就说明 OK. 大约 10 秒.</i>"),
             w));
         editor_stack_->insertWidget(int(StepType::MOVE_CARTESIAN), w);
     }

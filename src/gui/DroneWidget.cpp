@@ -16,6 +16,8 @@
 #include <QLineEdit>
 #include <QHostAddress>
 #include <QPushButton>
+#include <QHash>
+#include <QSet>
 #include <QSettings>
 #include <QSpinBox>
 #include <QStandardPaths>
@@ -386,6 +388,13 @@ void DroneWidget::updateNodeTimestamp(int octet, const QString &text)
 
 void DroneWidget::updateMeshNodes(const QList<MeshNode> &nodes)
 {
+    // While the mesh-widget 仿真 is active, ignore real ping data — the
+    // simulated cards are owned by setSimulationTelemetry() and would get
+    // clobbered back to "inactive" on the next ping cycle.
+    if (sim_active_) {
+        return;
+    }
+
     for (const MeshNode &node : nodes) {
         if (node.id < 102 || node.id > 106) {
             continue;
@@ -394,6 +403,83 @@ void DroneWidget::updateMeshNodes(const QList<MeshNode> &nodes)
     }
 
     refreshDroneStates();
+}
+
+void DroneWidget::setSimulationTelemetry(bool active, const QList<MeshNode> &nodes)
+{
+    sim_active_ = active;
+
+    if (!active) {
+        // Drop sim state — mark every card inactive and let the next
+        // mesh-ping cycle (or manual refresh) repopulate with real data.
+        for (int octet : kDroneNodes) {
+            setNodeActive(octet, false);
+        }
+        setStatus("扫描已停止", "#7f8aa3");
+        return;
+    }
+
+    // Per-node mock telemetry. Lat/lng cluster around a single point with
+    // small decimal-place jitter (5th–6th decimal); altitude pinned at 0.0 m
+    // per the demo brief. Battery/heading just exist to look credible.
+    struct SimTelemetry {
+        int    octet;
+        int    batteryPct;
+        int    batteryMv;
+        int    batteryDc;
+        double altM;
+        double headingDeg;
+        double lat;
+        double lng;
+        int    gpsSats;
+    };
+    static const SimTelemetry kSim[] = {
+        { 102, 92, 12450, 28, 0.0,  87.0, 22.543021, 113.934152, 14 },
+        { 103, 87, 12380, 30, 0.0, 142.0, 22.543174, 113.934283, 13 },
+        { 104, 95, 12490, 26, 0.0,  15.0, 22.542958, 113.934017, 15 },
+        { 105, 78, 12210, 32, 0.0, 273.0, 22.543112, 113.934378, 12 },
+    };
+
+    QHash<int, const SimTelemetry*> simByOctet;
+    for (const auto &t : kSim) simByOctet.insert(t.octet, &t);
+
+    // Build the "active" set from the mesh widget's lit nodes so the two
+    // views stay in lockstep. Anything outside 102..105 (e.g. HOST .101)
+    // is ignored — DroneWidget has no card for it.
+    QSet<int> litOctets;
+    for (const MeshNode &n : nodes) {
+        if (n.reachable && n.id >= 102 && n.id <= 105) {
+            litOctets.insert(n.id);
+        }
+    }
+
+    int lit = 0;
+    const QString stamp = QTime::currentTime().toString("hh:mm:ss");
+    for (int octet : kDroneNodes) {
+        const bool active = litOctets.contains(octet);
+        setNodeActive(octet, active);
+        if (!active) continue;
+
+        const SimTelemetry *t = simByOctet.value(octet, nullptr);
+        if (!t) continue;
+
+        altitude_labels_[octet]->setText(
+            dashValue("高度", QString("%1 m").arg(t->altM, 0, 'f', 1)));
+        heading_labels_[octet]->setText(
+            dashValue("航向", QString("%1 deg").arg(t->headingDeg, 0, 'f', 1)));
+        gps_labels_[octet]->setText(
+            dashValue("GPS", QString("%1°N, %2°E  sats=%3")
+                                .arg(t->lat, 0, 'f', 6)
+                                .arg(t->lng, 0, 'f', 6)
+                                .arg(t->gpsSats)));
+        battery_labels_[octet]->setText(
+            dashValue("电池", QString("%1%  %2 mV  %3 dC")
+                                .arg(t->batteryPct).arg(t->batteryMv).arg(t->batteryDc)));
+        updateNodeTimestamp(octet, stamp);
+        ++lit;
+    }
+
+    setStatus(QString("已发现 %1 个节点").arg(lit), "#4caf50");
 }
 
 void DroneWidget::sendRpcRequest(int octet, const QString &method)
@@ -413,6 +499,11 @@ void DroneWidget::sendRpcRequest(int octet, const QString &method)
 
 void DroneWidget::refreshDroneStates()
 {
+    // Sim mode holds the labels — skip the real UDP poll entirely.
+    if (sim_active_) {
+        return;
+    }
+
     int activeCount = 0;
     for (int octet : kDroneNodes) {
         if (!active_nodes_.value(octet, false)) {

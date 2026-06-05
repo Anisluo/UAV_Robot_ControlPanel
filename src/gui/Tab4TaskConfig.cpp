@@ -406,6 +406,26 @@ QWidget* Tab4TaskConfig::buildTaskPanel()
     bar->addWidget(btn_flow_import_);
     bar->addSpacing(10);
 
+    // Phase-only shortcuts: 取电 (phase1 = stage 1..5) / 换电 (phase2 = stage 6..9).
+    // Both use the implementation that ▶ 开始 / 实机模式 uses internally — only
+    // difference is they cap flow_real_end_stage_idx_ so the run stops at the
+    // phase boundary instead of marching through all 9 stages.
+    btn_flow_pickup_ = new QPushButton(QStringLiteral("🔋 取电"), grp);
+    btn_flow_swap_   = new QPushButton(QStringLiteral("🔁 换电"), grp);
+    btn_flow_pickup_->setToolTip(QStringLiteral("跑 phase1: stage 1~5 (INIT → PLATFORM). 需 RPC 已连接 + 已录脚本"));
+    btn_flow_swap_  ->setToolTip(QStringLiteral("跑 phase2: stage 6~9 (FETCH → DONE). 需 RPC 已连接 + 已录脚本"));
+    btn_flow_pickup_->setFixedHeight(32);
+    btn_flow_swap_  ->setFixedHeight(32);
+    btn_flow_pickup_->setStyleSheet(
+        "QPushButton{ background:#6a4; color:white; font-weight:bold; padding:4px 12px; border-radius:4px; }"
+        "QPushButton:hover{ background:#7c5; } QPushButton:disabled{ background:#446; color:#aab; }");
+    btn_flow_swap_  ->setStyleSheet(
+        "QPushButton{ background:#a64; color:white; font-weight:bold; padding:4px 12px; border-radius:4px; }"
+        "QPushButton:hover{ background:#b75; } QPushButton:disabled{ background:#446; color:#aab; }");
+    bar->addWidget(btn_flow_pickup_);
+    bar->addWidget(btn_flow_swap_);
+    bar->addSpacing(10);
+
     bar->addWidget(btn_estop_);
     bar->addStretch(1);
 
@@ -439,6 +459,8 @@ QWidget* Tab4TaskConfig::buildTaskPanel()
     connect(btn_flow_reset_, &QPushButton::clicked,   this, &Tab4TaskConfig::onFlowReset);
     connect(btn_flow_export_,&QPushButton::clicked,   this, &Tab4TaskConfig::onFlowExport);
     connect(btn_flow_import_,&QPushButton::clicked,   this, &Tab4TaskConfig::onFlowImport);
+    connect(btn_flow_pickup_,&QPushButton::clicked,   this, &Tab4TaskConfig::onFlowPickup);
+    connect(btn_flow_swap_,  &QPushButton::clicked,   this, &Tab4TaskConfig::onFlowSwap);
     connect(btn_estop_,      &QPushButton::clicked,   this, &Tab4TaskConfig::onEstopTask);
     connect(flow_widget_,    &TaskFlowWidget::stationClicked,
             this,            &Tab4TaskConfig::onFlowStationClicked);
@@ -940,8 +962,9 @@ void Tab4TaskConfig::onFlowStart()
             return;
         }
         appendLog("info", "实机模式启动 — 串行执行 9 个 stage 的录制脚本");
-        flow_real_sequential_  = true;
-        flow_real_stage_idx_   = -1;   // startRealStage 会从 0 开始找
+        flow_real_sequential_     = true;
+        flow_real_stage_idx_      = -1;   // startRealStage 会从 0 开始找
+        flow_real_end_stage_idx_  = -1;   // ▶ 开始走老路径 — 跑到底
 
         // step_advance_timer 没建过先建
         if (!step_advance_timer_) {
@@ -962,12 +985,86 @@ void Tab4TaskConfig::onFlowStart()
     }
 }
 
+void Tab4TaskConfig::onFlowPickup()
+{
+    if (flow_running_) {
+        appendLog("warn", "取电: 已有任务在跑, 先 ⏸ 停止");
+        return;
+    }
+    if (!rpc_ || !rpc_->isConnected()) {
+        appendLog("error", "取电: RPC 未连接");
+        return;
+    }
+    appendLog("info", "▶ 取电 (phase1, stage 1~5) 启动");
+    flow_widget_->resetAll();
+    flow_simulating_         = false;
+    flow_running_            = true;
+    flow_real_sequential_    = true;
+    flow_real_stage_idx_     = -1;
+    flow_real_end_stage_idx_ = 4;   // 含 → 跑到 stage idx 4 (即第 5 个) 就停
+    btn_flow_start_->setEnabled(false);
+    btn_flow_stop_->setEnabled(true);
+    if (!step_advance_timer_) {
+        step_advance_timer_ = new QTimer(this);
+        step_advance_timer_->setInterval(1500);
+        connect(step_advance_timer_, &QTimer::timeout,
+                this, &Tab4TaskConfig::onFlowStepAdvance);
+    }
+    if (!startRealStage(0)) {
+        appendLog("warn", "取电: stage 1~5 全部没有录制脚本");
+        flow_real_sequential_    = false;
+        flow_real_end_stage_idx_ = -1;
+        flow_running_            = false;
+        btn_flow_start_->setEnabled(true);
+        btn_flow_stop_->setEnabled(false);
+    }
+}
+
+void Tab4TaskConfig::onFlowSwap()
+{
+    if (flow_running_) {
+        appendLog("warn", "换电: 已有任务在跑, 先 ⏸ 停止");
+        return;
+    }
+    if (!rpc_ || !rpc_->isConnected()) {
+        appendLog("error", "换电: RPC 未连接");
+        return;
+    }
+    appendLog("info", "▶ 换电 (phase2, stage 6~9) 启动");
+    flow_widget_->resetAll();
+    flow_simulating_         = false;
+    flow_running_            = true;
+    flow_real_sequential_    = true;
+    flow_real_stage_idx_     = -1;
+    flow_real_end_stage_idx_ = 8;   // 含 → 跑到 stage idx 8 (即第 9 个) 就停
+    btn_flow_start_->setEnabled(false);
+    btn_flow_stop_->setEnabled(true);
+    if (!step_advance_timer_) {
+        step_advance_timer_ = new QTimer(this);
+        step_advance_timer_->setInterval(1500);
+        connect(step_advance_timer_, &QTimer::timeout,
+                this, &Tab4TaskConfig::onFlowStepAdvance);
+    }
+    if (!startRealStage(5)) {
+        appendLog("warn", "换电: stage 6~9 全部没有录制脚本");
+        flow_real_sequential_    = false;
+        flow_real_end_stage_idx_ = -1;
+        flow_running_            = false;
+        btn_flow_start_->setEnabled(true);
+        btn_flow_stop_->setEnabled(false);
+    }
+}
+
 // 实机串行模式专用 — 从 from_idx 开始往后找第一个有录制脚本的 stage 装上去
 // 并跑起来. 没找到返回 false (表示流程到底了, 收摊).
 bool Tab4TaskConfig::startRealStage(int from_idx)
 {
     const auto &stages = TaskFlowWidget::stages();
-    for (int i = from_idx; i < stages.size(); ++i) {
+    // 取电 / 换电 设了上界, 不能越界找下一个有脚本的 stage; -1 = 无上界.
+    const int search_end = (flow_real_end_stage_idx_ >= 0)
+                              ? qMin<int>(flow_real_end_stage_idx_ + 1, stages.size())
+                              : stages.size();
+    for (int i = from_idx; i < search_end; ++i) {
         const QString sid = stages[i].id;
         const auto it = stage_scripts_.constFind(sid);
         if (it == stage_scripts_.constEnd() || it.value().isEmpty()) {
@@ -1003,8 +1100,9 @@ bool Tab4TaskConfig::startRealStage(int from_idx)
         return true;
     }
     // 找不到下一个 → 全跑完了
-    flow_real_sequential_ = false;
-    flow_real_stage_idx_  = -1;
+    flow_real_sequential_     = false;
+    flow_real_stage_idx_      = -1;
+    flow_real_end_stage_idx_  = -1;
     if (step_advance_timer_) step_advance_timer_->stop();
     flow_running_ = false;
     btn_flow_start_->setEnabled(true);
@@ -1034,10 +1132,11 @@ void Tab4TaskConfig::onFlowStop()
     } else if (flow_real_sequential_) {
         // 实机串行模式: 停步进 timer, 清状态
         if (step_advance_timer_) step_advance_timer_->stop();
-        flow_real_sequential_ = false;
-        flow_real_stage_idx_  = -1;
-        flow_step_run_idx_    = -1;
-        flow_step_use_script_ = false;
+        flow_real_sequential_     = false;
+        flow_real_stage_idx_      = -1;
+        flow_real_end_stage_idx_  = -1;
+        flow_step_run_idx_        = -1;
+        flow_step_use_script_     = false;
         flow_step_script_.clear();
         if (rpc_ && rpc_->isConnected()) {
             rpc_->call(Protocol::Methods::ARM_STOP, QJsonObject{}, nullptr);
@@ -1403,6 +1502,22 @@ void Tab4TaskConfig::onFlowStepAdvance()
             flow_step_run_idx_ = -1;
             flow_step_use_script_ = false;
             flow_step_script_.clear();
+            // 取电 / 换电 按钮设了上界 (含). 越界就收尾, 不再下钻.
+            if (flow_real_end_stage_idx_ >= 0 && next > flow_real_end_stage_idx_) {
+                appendLog("info",
+                    QString("[实机] ✓ 阶段段落跑完 (stage %1..%2)")
+                        .arg(flow_real_stage_idx_ + 1)   // 这里 stage_idx 还是当前完成的
+                        .arg(flow_real_end_stage_idx_ + 1));
+                flow_real_sequential_     = false;
+                flow_real_stage_idx_      = -1;
+                flow_real_end_stage_idx_  = -1;
+                if (step_advance_timer_) step_advance_timer_->stop();
+                flow_running_ = false;
+                btn_flow_start_->setEnabled(true);
+                btn_flow_stop_->setEnabled(false);
+                flow_status_label_->setText("[实机] ✓ 段落完成");
+                return;
+            }
             if (startRealStage(next)) {
                 return;   // startRealStage 已经把下一个 stage 的第一步打出去 + timer 启了
             }
@@ -1766,7 +1881,12 @@ void Tab4TaskConfig::dispatchScriptStep(const TaskStep &step)
                 : (max_ms + kStallSettleMs);
 
             // Status poll — advance condition depends on stop_mode.
-            const int session_run_idx = flow_step_run_idx_;
+            // 注意 +1: 调用方 (onFlowStepAdvance script 分支) 在 dispatchScriptStep
+            // 返回之后立刻 ++flow_step_run_idx_. 所以"我们仍在这一步上"的
+            // 当前 run_idx 实际是 dispatch 时的值 + 1. 不加这个 +1, 下面
+            // pollAirportRailDone 里的 (flow_step_run_idx_ != session_run_idx)
+            // 守卫会立刻为真, poll 永远跑不起来.
+            const int session_run_idx = flow_step_run_idx_ + 1;
             QTimer::singleShot(kStallSettleMs + 200, this,
                 [this, watched_rails, stop_mode, name, session_run_idx]() {
                     if (flow_step_run_idx_ != session_run_idx) return;

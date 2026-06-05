@@ -118,6 +118,10 @@ MainWindow::MainWindow(QWidget *parent)
             mesh_widget_,  &MeshMapWidget::updateNodes);
     connect(mesh_pinger_, &MeshPinger::nodesUpdated,
             drone_widget_, &DroneWidget::updateMeshNodes);
+    // Mesh-widget "仿真" button → drone-card mock telemetry (alt=0, GPS
+    // clustered with decimal-place jitter, mock battery/heading/rate).
+    connect(mesh_widget_, &MeshMapWidget::simulationToggled,
+            drone_widget_, &DroneWidget::setSimulationTelemetry);
     mesh_pinger_->start(5000);
 
     // Initial state
