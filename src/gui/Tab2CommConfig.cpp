@@ -228,9 +228,9 @@ QWidget *Tab2CommConfig::buildHostBox()
     {
         auto *sub = makeSub(grp, QStringLiteral("网络地址"), ACC);
         auto *f = innerForm(sub);
-        host_edit_     = new QLineEdit("192.168.1.101", sub);
+        host_edit_     = new QLineEdit("192.168.200.101", sub);
         subnet_edit_   = new QLineEdit("255.255.255.0", sub);
-        gateway_edit_  = new QLineEdit("192.168.1.1",   sub);
+        gateway_edit_  = new QLineEdit("192.168.200.1", sub);
         mac_edit_      = new QLineEdit("AA:BB:CC:11:22:33", sub);
         eth_iface_combo_ = new QComboBox(sub);
         eth_iface_combo_->addItems({"eth0", "eth1", "wlan0"});

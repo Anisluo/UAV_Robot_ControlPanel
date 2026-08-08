@@ -58,7 +58,7 @@ void MeshPinger::onTimer()
     }
 
     for (int i = 0; i < kNodeCount; ++i) {
-        QString ip = QString("192.168.1.%1").arg(kNodes[i].octet);
+        QString ip = QString("192.168.200.%1").arg(kNodes[i].octet);
 
         QProcess *proc = new QProcess(this);
 

@@ -47,7 +47,25 @@ namespace Methods {
     constexpr const char* AIRPORT_GRIPPER    = "airport.gripper";
     constexpr const char* AIRPORT_GET_STATUS = "airport.get_status";   // per-rail state poll
     constexpr const char* AIRPORT_MOVE_DISTANCE = "airport.move_distance"; // open-loop relative N mm
+    constexpr const char* AIRPORT_MOVE_MM    = "airport.move_mm";      // closed-loop precise relative N mm (velocity + 0x36 feedback)
     constexpr const char* ARM_GRIPPER_SET    = "arm_gripper.set";
+    // 舱门 / 停机坪 — proc_door over RS485 Modbus RTU. Motion is async on
+    // the backend: these return once the coils are set, and proc_door's
+    // supervisor cuts power on limit-switch arrival or timeout. Poll
+    // DOOR_GET_STATUS (both axes + X1..X4 + Y1..Y4) to follow progress.
+    constexpr const char* DOOR_OPEN          = "door.open";       // 舱门开
+    constexpr const char* DOOR_CLOSE         = "door.close";      // 舱门关
+    constexpr const char* DOOR_STOP          = "door.stop";       // 舱门停
+    constexpr const char* DOOR_STOP_ALL      = "door.stop_all";   // 舱门+停机坪急停
+    constexpr const char* DOOR_GET_STATUS    = "door.get_status";
+    constexpr const char* DOOR_SET_RELAY     = "door.set_relay";  // {channel:1..N, on}
+    // Force-close and reopen the RS485 port. proc_door already retries on
+    // its own every 2 s, but after the relay board is power-cycled an
+    // operator wants a deterministic "try now" rather than waiting.
+    constexpr const char* DOOR_RECONNECT     = "door.reconnect";
+    constexpr const char* HELIPAD_UP         = "helipad.up";      // 停机坪上升
+    constexpr const char* HELIPAD_DOWN       = "helipad.down";    // 停机坪下降
+    constexpr const char* HELIPAD_STOP       = "helipad.stop";
     constexpr const char* CAMERA_SET_PROFILE = "camera.set_profile";
     constexpr const char* CAMERA_SET_EXPOSURE= "camera.set_exposure";
     constexpr const char* CONFIG_SET_CAN     = "config.set_can";
@@ -99,6 +117,7 @@ namespace Fields {
     constexpr const char* RAIL   = "rail";
     constexpr const char* POS_MM = "pos_mm";
     constexpr const char* DELTA_MM = "delta_mm";
+    constexpr const char* DIST_MM = "dist_mm";        // signed relative distance for airport.move_mm
     constexpr const char* SPEED_RPM = "speed_rpm";
     constexpr const char* OPEN   = "open";
 

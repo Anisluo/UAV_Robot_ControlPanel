@@ -23,6 +23,8 @@ enum class StepType {
     DWELL           = 7,    // pure delay (ms)
     FIX_POINT       = 8,    // hold TCP at a target pose for duration_ms
                             // (定点跟踪 — arm goes to point, stays there)
+    DOOR            = 9,    // 舱门 开/关/停 (proc_door, RS485 relay)
+    HELIPAD         = 10,   // 停机坪升降 上升/下降/停 (same board)
 };
 
 struct TaskStep {
@@ -67,6 +69,17 @@ struct TaskStep {
 //                  joints may rebalance/correct, but TCP point stays
 //                  pinned. Useful for: "look at this point for N seconds".
 // AIRPORT_GRIPPER  { open: bool }
+// DOOR             { action: "open"|"close"|"stop", max_ms: int }
+// HELIPAD          { action: "up"|"down"|"stop",    max_ms: int }
+//                  Both drive proc_door over RS485. Motion there is
+//                  asynchronous: the RPC returns as soon as the coils are
+//                  energised and proc_door's own supervisor cuts power when
+//                  the limit switch trips (X3/X4 for the hatch, X1/X2 for
+//                  the lift) or its timeout expires. The orchestrator polls
+//                  door.get_status and advances the moment the axis reports
+//                  moving=false, so a travel that finishes early does not
+//                  burn the rest of max_ms. max_ms is the GUI-side upper
+//                  bound; "stop" is instantaneous and never waits.
 // WAIT_DETECT_UAV  { present: bool, timeout_ms: int }
 //                  (present=true → wait until detected; false → wait until gone)
 // WAIT_DETECT_BAT  { present: bool, timeout_ms: int }

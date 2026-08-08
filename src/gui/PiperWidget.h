@@ -55,6 +55,7 @@ private slots:
     void onEnableClicked();     // piper.handshake (re-do CAN_CTRL handshake)
     void onEmergencyStopClicked();
     void onHomeClicked();       // arm.home (MoveJ to all-zero)
+    void onSafePoseClicked();   // MoveJ to the parked "safe" joint pose
     void onSpeedChanged(int pct);
 
     // ── joint tab ─────────────────────────────────────────────────────
@@ -113,6 +114,7 @@ private:
     QPushButton  *enable_btn_    = nullptr;
     QPushButton  *estop_btn_     = nullptr;
     QPushButton  *home_btn_      = nullptr;
+    QPushButton  *safe_btn_      = nullptr;   // 安全位 — folded parked pose
 
     // main tabs
     QTabWidget   *tabs_          = nullptr;

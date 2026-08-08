@@ -20,3 +20,6 @@ compile_commands.json
 
 # Large CAD redundancies (zip just duplicates the STEP)
 steps/*.zip
+
+# Local MinGW/Qt build tree (71 MB of objects + staged Qt DLLs)
+build_local/

@@ -33,6 +33,11 @@ public slots:
     // aren't overwritten on the next periodic poll.
     void setSimulationTelemetry(bool active, const QList<MeshNode> &nodes);
 
+signals:
+    // Emitted whenever a node reports a WGS-84 GPS fix (real telemetry or 仿真).
+    // MainWindow routes this to the dashboard MapWidget for marker + trajectory.
+    void dronePositionUpdated(int octet, double lat, double lng);
+
 private slots:
     void refreshDroneStates();
     void onUdpReadyRead();
@@ -44,7 +49,7 @@ private slots:
     void onKmzError(QAbstractSocket::SocketError err);
 
     // Remote control: a line-delimited JSON TCP server. Remote platforms
-    // send {"id":N,"cmd":"deploy_kmz","name":"<file>","target":"192.168.1.10X","port":14550}
+    // send {"id":N,"cmd":"deploy_kmz","name":"<file>","target":"192.168.200.10X","port":14550}
     // and HostGUI loads the named file from the configured KMZ library
     // directory, forwards it to the drone, and replies with the result.
     void onRemoteToggle(bool checked);
@@ -97,7 +102,7 @@ private:
 
     // KMZ 路径规划下发
     QLineEdit   *kmz_path_edit_;
-    QComboBox   *kmz_ip_combo_;   // 192.168.1.102..106 (drone mesh nodes)
+    QComboBox   *kmz_ip_combo_;   // 192.168.200.102..106 (drone mesh nodes)
     QSpinBox    *kmz_port_spin_;
     QPushButton *btn_kmz_load_;
     QPushButton *btn_kmz_send_;

@@ -50,6 +50,14 @@ constexpr double GRIPPER_MAX_MM = 80.0;
 
 constexpr int JOINT_SCALE = 100;   // slider int unit = 0.01°
 
+// 安全位 — the folded parked pose the operator recorded on the real arm
+// (2026-08-08). All-zero (回零) leaves the arm stretched out where it can
+// foul the airport structure; this is the tucked-in posture used at the
+// start/end of a task. Each value is inside JOINT_LIMITS above.
+constexpr std::array<double, 6> kSafePoseDeg = {
+    0.00, 21.97, -47.61, -0.94, 70.00, 0.00
+};
+
 }  // namespace
 
 
@@ -140,6 +148,22 @@ void PiperWidget::buildLayout() {
     home_btn_ = new QPushButton("回零", top_frame);
     home_btn_->setStyleSheet("QPushButton { padding:4px 12px; }");
     top_layout->addWidget(home_btn_);
+
+    safe_btn_ = new QPushButton("安全位", top_frame);
+    safe_btn_->setToolTip(
+        QStringLiteral("收拢到安全停放位姿 (MoveJ):\n"
+                       "J1=%1  J2=%2  J3=%3\nJ4=%4  J5=%5  J6=%6\n\n"
+                       "全零 (回零) 是伸直的, 容易碰到机场结构; 这个位姿是"
+                       "臂收起来的姿态, 适合任务开始/结束时停放。\n"
+                       "运动速度用顶栏当前的速度设置。")
+            .arg(kSafePoseDeg[0], 0, 'f', 2).arg(kSafePoseDeg[1], 0, 'f', 2)
+            .arg(kSafePoseDeg[2], 0, 'f', 2).arg(kSafePoseDeg[3], 0, 'f', 2)
+            .arg(kSafePoseDeg[4], 0, 'f', 2).arg(kSafePoseDeg[5], 0, 'f', 2));
+    safe_btn_->setStyleSheet(
+        "QPushButton { background:#2f6f9f; color:white; font-weight:bold;"
+        "              padding:4px 12px; border-radius:4px; }"
+        "QPushButton:hover { background:#3a83b8; }");
+    top_layout->addWidget(safe_btn_);
 
     // No software 示教 toggle: Piper V1.8-2 firmware doesn't expose a CAN
     // command that enters the real ctrl_mode=0x02 TEACHING state with
@@ -534,6 +558,7 @@ void PiperWidget::connectSignals() {
     connect(enable_btn_,  &QPushButton::clicked, this, &PiperWidget::onEnableClicked);
     connect(estop_btn_,   &QPushButton::clicked, this, &PiperWidget::onEmergencyStopClicked);
     connect(home_btn_,    &QPushButton::clicked, this, &PiperWidget::onHomeClicked);
+    connect(safe_btn_,    &QPushButton::clicked, this, &PiperWidget::onSafePoseClicked);
 
     // joint tab
     for (int i = 0; i < 6; ++i) {
@@ -674,6 +699,23 @@ void PiperWidget::onEmergencyStopClicked() {
 
 void PiperWidget::onHomeClicked() {
     rpc_->call(Protocol::Methods::ARM_HOME, QJsonObject{}, nullptr);
+}
+
+void PiperWidget::onSafePoseClicked() {
+    // Same path as 发送目标 in the joint tab — one MoveJ to all six angles.
+    // The joint spinboxes are updated too so the tab reflects where the arm
+    // is being sent, matching what the operator sees on the 3-D viewer.
+    QJsonArray angles;
+    for (int i = 0; i < 6; ++i) {
+        angles.append(kSafePoseDeg[i]);
+        if (joint_spins_[i]) {
+            const QSignalBlocker block(joint_spins_[i]);
+            joint_spins_[i]->setValue(kSafePoseDeg[i]);
+        }
+    }
+    QJsonObject p;
+    p["angles"] = angles;
+    rpc_->call(Protocol::Methods::ARM_MOVE_JOINTS, p, nullptr);
 }
 
 void PiperWidget::onSpeedChanged(int pct) {

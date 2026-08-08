@@ -1,6 +1,9 @@
 #include "DroneWidget.h"
 #include "MeshMapWidget.h"
 
+#include <cmath>
+#include <initializer_list>
+
 #include <QDir>
 #include <QFile>
 #include <QFileDialog>
@@ -79,8 +82,8 @@ void DroneWidget::buildUi()
     targetLabel->setStyleSheet("color: #00c8d7; font-family: Consolas;");
     targetLabel->setFixedWidth(64);
 
-    target_host_edit_ = new QLineEdit("192.168.1.101", this);
-    target_host_edit_->setPlaceholderText("192.168.1.10x");
+    target_host_edit_ = new QLineEdit("192.168.200.101", this);
+    target_host_edit_->setPlaceholderText("192.168.200.10x");
 
     auto *portHint = new QLabel(QString("PSDK UDP %1").arg(kDroneRpcPort), this);
     portHint->setStyleSheet("font-family: Consolas; color: #7f8aa3;");
@@ -157,7 +160,7 @@ void DroneWidget::buildUi()
 
     kmz_ip_combo_ = new QComboBox(this);
     for (int octet : kDroneNodes) {
-        kmz_ip_combo_->addItem(QStringLiteral("192.168.1.%1").arg(octet));
+        kmz_ip_combo_->addItem(QStringLiteral("192.168.200.%1").arg(octet));
     }
     kmz_ip_combo_->setFixedWidth(130);
 
@@ -250,7 +253,7 @@ void DroneWidget::buildUi()
 
     auto *remoteHelp = new QLabel(
         QStringLiteral("<i>协议: 每行一个 JSON. 例:<br>"
-                       "  {\"id\":1,\"cmd\":\"deploy_kmz\",\"name\":\"plan1\",\"target\":\"192.168.1.102\",\"port\":14550}<br>"
+                       "  {\"id\":1,\"cmd\":\"deploy_kmz\",\"name\":\"plan1\",\"target\":\"192.168.200.102\",\"port\":14550}<br>"
                        "  {\"id\":2,\"cmd\":\"list_kmz\"}    /    {\"id\":3,\"cmd\":\"ping\"}<br>"
                        "回复同 id, 含 ok=true/false. 文件名可省略 .kmz 扩展.</i>"),
         this);
@@ -337,7 +340,7 @@ void DroneWidget::setDefaultTargetHost(const QString &host)
 
 QString DroneWidget::nodeIp(int octet) const
 {
-    return QString("192.168.1.%1").arg(octet);
+    return QString("192.168.200.%1").arg(octet);
 }
 
 void DroneWidget::setNodeActive(int octet, bool active)
@@ -476,6 +479,7 @@ void DroneWidget::setSimulationTelemetry(bool active, const QList<MeshNode> &nod
             dashValue("电池", QString("%1%  %2 mV  %3 dC")
                                 .arg(t->batteryPct).arg(t->batteryMv).arg(t->batteryDc)));
         updateNodeTimestamp(octet, stamp);
+        emit dronePositionUpdated(octet, t->lat, t->lng);
         ++lit;
     }
 
@@ -556,12 +560,33 @@ void DroneWidget::onUdpReadyRead()
             const int gpsSats = result.value("gps_sats").toInt();
             const int gpsFix = result.value("gps_fix").toInt();
 
+            // Latitude/longitude field names vary between PSDK builds — accept
+            // the common spellings, and de-scale the 1e7 fixed-point form.
+            auto pick = [&result](std::initializer_list<const char*> keys) -> double {
+                for (const char *k : keys)
+                    if (result.contains(QLatin1String(k)))
+                        return result.value(QLatin1String(k)).toDouble();
+                return 0.0;
+            };
+            double lat = pick({"lat", "latitude", "lat_deg", "gps_lat"});
+            double lng = pick({"lng", "lon", "longitude", "lng_deg", "lon_deg", "gps_lon"});
+            if (std::fabs(lat) > 90.0)  lat /= 1e7;
+            if (std::fabs(lng) > 180.0) lng /= 1e7;
+
             altitude_labels_[req.octet]->setText(
                 dashValue("高度", QString("%1 m").arg(altRel, 0, 'f', 1)));
             heading_labels_[req.octet]->setText(
                 dashValue("航向", QString("%1 deg").arg(heading, 0, 'f', 1)));
-            gps_labels_[req.octet]->setText(
-                dashValue("GPS", QString("fix=%1 sats=%2").arg(gpsFix).arg(gpsSats)));
+            if (lat != 0.0 || lng != 0.0) {
+                gps_labels_[req.octet]->setText(
+                    dashValue("GPS", QString("%1,%2 fix=%3 sats=%4")
+                                        .arg(lat, 0, 'f', 6).arg(lng, 0, 'f', 6)
+                                        .arg(gpsFix).arg(gpsSats)));
+                emit dronePositionUpdated(req.octet, lat, lng);
+            } else {
+                gps_labels_[req.octet]->setText(
+                    dashValue("GPS", QString("fix=%1 sats=%2").arg(gpsFix).arg(gpsSats)));
+            }
             updateNodeTimestamp(req.octet, QTime::currentTime().toString("hh:mm:ss"));
         } else if (req.method == "drone.get_battery_info") {
             const int pct = result.value("remaining_pct").toInt(-1);

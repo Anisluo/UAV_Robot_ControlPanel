@@ -5,9 +5,11 @@
 #include "PiperWidget.h"
 #include "UGVWidget.h"
 #include "AirportWidget.h"
+#include "DoorWidget.h"
 #include "GripperWidget.h"
 #include "MeshMapWidget.h"
 #include "DroneWidget.h"
+#include "MapWidget.h"
 #include "CalibWidget.h"
 #include "TeachWidget.h"
 #include "Tab2CommConfig.h"
@@ -113,7 +115,7 @@ MainWindow::MainWindow(QWidget *parent)
     connect(video_client_, &VideoClient::fpsUpdated,  this,           &MainWindow::onFpsUpdated);
     connect(video_client_, &VideoClient::logMessage,  this,           &MainWindow::onLogMessage);
 
-    // Mesh topology: ping 192.168.1.101..106 every 5 s, update map widget
+    // Mesh topology: ping 192.168.200.101..106 every 5 s, update map widget
     connect(mesh_pinger_, &MeshPinger::nodesUpdated,
             mesh_widget_,  &MeshMapWidget::updateNodes);
     connect(mesh_pinger_, &MeshPinger::nodesUpdated,
@@ -122,6 +124,9 @@ MainWindow::MainWindow(QWidget *parent)
     // clustered with decimal-place jitter, mock battery/heading/rate).
     connect(mesh_widget_, &MeshMapWidget::simulationToggled,
             drone_widget_, &DroneWidget::setSimulationTelemetry);
+    // Drone GPS fixes → dashboard map marker + trajectory.
+    connect(drone_widget_, &DroneWidget::dronePositionUpdated,
+            map_widget_,   &MapWidget::setDronePosition);
     mesh_pinger_->start(5000);
 
     // Initial state
@@ -226,14 +231,20 @@ QWidget* MainWindow::buildDashboardTab()
     // actual size.
     camera_widget_->setMinimumHeight(120);
 
+    // 无人机地图: OSM 免费底图 + 经纬度 + 运动轨迹，放在相机窗口正下方。
+    map_widget_ = new MapWidget(leftSplitter);
+    map_widget_->setMinimumHeight(160);
+
     log_widget_ = new LogWidget(rpc_client_, leftSplitter);
     log_widget_->setMinimumHeight(120);
 
     leftSplitter->addWidget(camera_widget_);
+    leftSplitter->addWidget(map_widget_);
     leftSplitter->addWidget(log_widget_);
     leftSplitter->setStretchFactor(0, 3);
-    leftSplitter->setStretchFactor(1, 1);
-    leftSplitter->setSizes({600, 200});
+    leftSplitter->setStretchFactor(1, 3);
+    leftSplitter->setStretchFactor(2, 1);
+    leftSplitter->setSizes({420, 320, 160});
 
     mainSplitter->addWidget(leftSplitter);
 
@@ -264,11 +275,12 @@ QWidget* MainWindow::buildDashboardTab()
     arm_widget_->hide();
     ugv_widget_     = new UGVWidget(rpc_client_, rightContainer);
     airport_widget_ = new AirportWidget(rpc_client_, rightContainer);
+    door_widget_    = new DoorWidget(rpc_client_, rightContainer);
     gripper_widget_ = new GripperWidget(rpc_client_, rightContainer);
     gripper_widget_->hide();   // Piper has built-in gripper; legacy probe re-shows
     mesh_widget_    = new MeshMapWidget(rightContainer);
     drone_widget_   = new DroneWidget(rightContainer);
-    drone_widget_->setDefaultTargetHost("192.168.1.101");
+    drone_widget_->setDefaultTargetHost("192.168.200.101");
 
     // Hand-eye calibration sits between the arm widget and the UGV widget —
     // it pairs the on-board RealSense (RK3588 side) with the Piper flange
@@ -287,6 +299,7 @@ QWidget* MainWindow::buildDashboardTab()
     rightLayout->addWidget(calib_widget_);   // 手眼标定
     rightLayout->addWidget(ugv_widget_);
     rightLayout->addWidget(airport_widget_);
+    rightLayout->addWidget(door_widget_);
     rightLayout->addWidget(gripper_widget_);
     rightLayout->addWidget(mesh_widget_);
     rightLayout->addWidget(drone_widget_);
@@ -312,7 +325,7 @@ QWidget* MainWindow::buildConnectionGroup()
     // Host row
     auto *hostRow = new QHBoxLayout;
     hostRow->addWidget(new QLabel("主机:", grp));
-    host_edit_ = new QLineEdit("192.168.1.101", grp);
+    host_edit_ = new QLineEdit("192.168.200.101", grp);
     hostRow->addWidget(host_edit_);
     layout->addLayout(hostRow);
 
@@ -447,6 +460,10 @@ void MainWindow::onRpcConnected()
             }
         });
 
+    // 舱门 / 停机坪: start the 300 ms status poll that drives the sensor
+    // LEDs and the axis state labels.
+    if (door_widget_) door_widget_->onRpcConnected();
+
     // Start polling NPU detections so the camera view shows bounding boxes.
     if (det_timer_ == nullptr) {
         det_timer_ = new QTimer(this);
@@ -527,6 +544,7 @@ void MainWindow::onRpcDisconnected()
     camera_widget_->setDetections({});
 
     if (piper_widget_) piper_widget_->onRpcDisconnected();
+    if (door_widget_)  door_widget_->onRpcDisconnected();
 }
 
 void MainWindow::pollDetections()
@@ -580,8 +598,8 @@ void MainWindow::onTabChanged(int index)
         // (above the log) so the original layout is restored.
         if (camera_widget_->parentWidget() != dash_left_splitter_) {
             camera_widget_->setParent(dash_left_splitter_);
-            dash_left_splitter_->insertWidget(0, camera_widget_);
-            dash_left_splitter_->setSizes({600, 200});
+            dash_left_splitter_->insertWidget(0, camera_widget_);   // above map + log
+            dash_left_splitter_->setSizes({420, 320, 160});
             camera_widget_->show();
         }
     }

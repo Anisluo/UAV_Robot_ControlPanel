@@ -78,7 +78,7 @@ void StageConfigDialog::buildUi()
 
     auto *add_row = new QHBoxLayout;
     cmb_add_ = new QComboBox(this);
-    for (int t = int(StepType::MOVE_JOINTS); t <= int(StepType::FIX_POINT); ++t) {
+    for (int t = int(StepType::MOVE_JOINTS); t <= int(StepType::HELIPAD); ++t) {
         cmb_add_->addItem(TaskStep::typeLabel(StepType(t)), int(t));
     }
     btn_add_  = new QPushButton(QStringLiteral("+ 加步骤"), this);
@@ -568,6 +568,149 @@ void StageConfigDialog::buildEditPanels()
 
         editor_stack_->insertWidget(int(StepType::FIX_POINT), w);
     }
+
+    // 9 DOOR (舱门) / 10 HELIPAD (停机坪升降)
+    //
+    // Both are the same shape — an action combo, a GUI-side upper bound, a
+    // live-state readout and a 录当前状态 button — so build them from one
+    // lambda instead of duplicating the wiring twice.
+    {
+        auto buildAxisPanel = [this](bool helipad,
+                                     QComboBox **action_out,
+                                     QSpinBox  **max_ms_out,
+                                     QLabel    **state_out,
+                                     QPushButton **record_out,
+                                     int default_max_ms,
+                                     const QString &hint) {
+            auto *w = new QWidget(this);
+            auto *f = new QFormLayout(w);
+            f->setContentsMargins(8, 8, 8, 8);
+
+            auto *action = new QComboBox(w);
+            if (helipad) {
+                action->addItem(QStringLiteral("上升 (到上限位 X1)"), "up");
+                action->addItem(QStringLiteral("下降 (到下限位 X2)"), "down");
+                action->addItem(QStringLiteral("停止 (立即断电)"),     "stop");
+            } else {
+                action->addItem(QStringLiteral("开舱门 (到开限位 X3)"), "open");
+                action->addItem(QStringLiteral("关舱门 (到关限位 X4)"), "close");
+                action->addItem(QStringLiteral("停止 (立即断电)"),       "stop");
+            }
+
+            auto *max_ms = new QSpinBox(w);
+            max_ms->setRange(500, 120000);
+            max_ms->setValue(default_max_ms);
+            max_ms->setSingleStep(1000);
+            max_ms->setSuffix("ms");
+
+            auto *state = new QLabel(QStringLiteral("<i>未读取</i>"), w);
+            state->setStyleSheet("color:#888aaa; font-family: Consolas;");
+
+            auto *record = new QPushButton(QStringLiteral("📍 录当前状态为本步动作"), w);
+            record->setStyleSheet(
+                "QPushButton{ background:#3a8; color:white; font-weight:bold;"
+                " padding:4px 10px; border-radius:4px; }"
+                "QPushButton:hover{ background:#4ba; }");
+
+            connect(action, QOverload<int>::of(&QComboBox::currentIndexChanged),
+                    this, &StageConfigDialog::onParamChanged);
+            connect(max_ms, QOverload<int>::of(&QSpinBox::valueChanged),
+                    this, &StageConfigDialog::onParamChanged);
+            connect(record, &QPushButton::clicked, this,
+                    [this, helipad]() { recordDoorState(helipad); });
+
+            f->addRow(QStringLiteral("动作"), action);
+            f->addRow(QStringLiteral("最长等待"), max_ms);
+            f->addRow(QStringLiteral("当前状态"), state);
+            f->addRow(record);
+            f->addRow(new QLabel(hint, w));
+
+            *action_out = action;
+            *max_ms_out = max_ms;
+            *state_out  = state;
+            *record_out = record;
+            return w;
+        };
+
+        editor_stack_->insertWidget(
+            int(StepType::DOOR),
+            buildAxisPanel(false, &dr_action_, &dr_max_ms_, &dr_state_, &btn_dr_record_,
+                           20000,
+                           QStringLiteral(
+                               "<i>door.open / door.close / door.stop → proc_door (RS485)。"
+                               "后端异步驱动 Y3/Y4 并自己盯 X3/X4 限位, 到位或超时即断电; "
+                               "本步在轴报 moving=false 时立刻推进, 不会白等满最长时间。</i>")));
+
+        editor_stack_->insertWidget(
+            int(StepType::HELIPAD),
+            buildAxisPanel(true, &hp_action_, &hp_max_ms_, &hp_state_, &btn_hp_record_,
+                           30000,
+                           QStringLiteral(
+                               "<i>helipad.up / helipad.down / helipad.stop → proc_door (RS485)。"
+                               "后端异步驱动 Y1/Y2 并自己盯 X1/X2 限位, 到位或超时即断电; "
+                               "本步在轴报 moving=false 时立刻推进。</i>")));
+    }
+}
+
+// 录当前状态: read door.get_status and select the action matching the
+// position the axis is resting at. The arm's 录当前关节 captures a live
+// pose; for a two-ended axis the equivalent capture is "which end is it at
+// right now" — that is exactly the action that would reproduce it.
+void StageConfigDialog::recordDoorState(bool helipad)
+{
+    QLabel *state_lbl = helipad ? hp_state_ : dr_state_;
+    if (!rpc_ || !rpc_->isConnected()) {
+        if (state_lbl) {
+            state_lbl->setText(QStringLiteral("未连接 RK3588"));
+            state_lbl->setStyleSheet("color:#e05050; font-family: Consolas;");
+        }
+        return;
+    }
+
+    rpc_->call(Protocol::Methods::DOOR_GET_STATUS, QJsonObject{},
+        [this, helipad, state_lbl](QJsonObject reply) {
+            QComboBox *combo = helipad ? hp_action_ : dr_action_;
+            if (!combo || !state_lbl) return;
+
+            if (!reply.value("connected").toBool(false)) {
+                state_lbl->setText(QStringLiteral("继电器模块无响应"));
+                state_lbl->setStyleSheet("color:#e05050; font-family: Consolas;");
+                return;
+            }
+
+            const QJsonObject axis =
+                reply.value(helipad ? "helipad" : "hatch").toObject();
+            const QString st = axis.value("state").toString();
+
+            // state → the action that puts the axis back here.
+            QString action;
+            QString shown;
+            if (helipad) {
+                if      (st == "top")    { action = "up";   shown = QStringLiteral("已到顶"); }
+                else if (st == "bottom") { action = "down"; shown = QStringLiteral("已到底"); }
+            } else {
+                if      (st == "opened") { action = "open";  shown = QStringLiteral("已开到位"); }
+                else if (st == "closed") { action = "close"; shown = QStringLiteral("已关到位"); }
+            }
+
+            if (action.isEmpty()) {
+                // Mid-travel / fault / no reading — there is no end position
+                // to capture, so change nothing rather than guess.
+                state_lbl->setText(
+                    QStringLiteral("%1 — 不在限位上, 未录入").arg(st.isEmpty() ? "unknown" : st));
+                state_lbl->setStyleSheet("color:#e0a030; font-family: Consolas;");
+                return;
+            }
+
+            const int idx = combo->findData(action);
+            if (idx >= 0) {
+                const QSignalBlocker block(combo);
+                combo->setCurrentIndex(idx);
+            }
+            state_lbl->setText(shown + QStringLiteral(" → 已录为本步动作"));
+            state_lbl->setStyleSheet("color:#3ac06a; font-family: Consolas;");
+            onParamChanged();
+        });
 }
 
 
@@ -678,6 +821,14 @@ void StageConfigDialog::onAddStep()
             s.params["ry_deg"]     = 85.0;
             s.params["rz_deg"]     = 0.0;
             s.params["duration_ms"] = 5000;
+            break;
+        case StepType::DOOR:
+            s.params["action"] = "open";
+            s.params["max_ms"] = 20000;    // matches UAV_DOOR_HATCH_TIMEOUT_MS
+            break;
+        case StepType::HELIPAD:
+            s.params["action"] = "up";
+            s.params["max_ms"] = 30000;    // matches UAV_DOOR_PAD_TIMEOUT_MS
             break;
     }
     steps_.append(s);
@@ -866,6 +1017,20 @@ void StageConfigDialog::showRow(int row)
             fp_duration_ms_->setValue(s.params.value("duration_ms", 5000).toInt());
             break;
         }
+        case StepType::DOOR: {
+            const QSignalBlocker b_a(dr_action_), b_m(dr_max_ms_);
+            int idx = dr_action_->findData(s.params.value("action", "open").toString());
+            dr_action_->setCurrentIndex(idx < 0 ? 0 : idx);
+            dr_max_ms_->setValue(s.params.value("max_ms", 20000).toInt());
+            break;
+        }
+        case StepType::HELIPAD: {
+            const QSignalBlocker b_a(hp_action_), b_m(hp_max_ms_);
+            int idx = hp_action_->findData(s.params.value("action", "up").toString());
+            hp_action_->setCurrentIndex(idx < 0 ? 0 : idx);
+            hp_max_ms_->setValue(s.params.value("max_ms", 30000).toInt());
+            break;
+        }
     }
 
     for (auto *e : editors) e->blockSignals(false);
@@ -926,6 +1091,14 @@ void StageConfigDialog::readEditorsTo(TaskStep &s)
             s.params["ry_deg"]      = fp_ry_->value();
             s.params["rz_deg"]      = fp_rz_->value();
             s.params["duration_ms"] = fp_duration_ms_->value();
+            break;
+        case StepType::DOOR:
+            s.params["action"] = dr_action_->currentData().toString();
+            s.params["max_ms"] = dr_max_ms_->value();
+            break;
+        case StepType::HELIPAD:
+            s.params["action"] = hp_action_->currentData().toString();
+            s.params["max_ms"] = hp_max_ms_->value();
             break;
     }
 }
@@ -1016,23 +1189,19 @@ void StageConfigDialog::onExecuteCurrentStep()
                 [this, action, stop_mode, rpm, dist, direction, watched_rails]() {
                     if (!rpc_) return;
                     if (stop_mode == "distance") {
-                        // GUI 计时方式 (matches Tab4 dispatch)
-                        const int time_ms = std::max(100,
-                            int(std::abs(dist) * 300000.0 / double(std::abs(rpm))));
+                        // CLOSED-LOOP precise move — identical to Tab4
+                        // dispatchScriptStep. Gateway airport.move_mm
+                        // (velocity + 0x36 encoder feedback) stops at the
+                        // exact target distance. Signed dist_mm carries the
+                        // direction. Replaces the old set_speed + timer + stop
+                        // (distance ≈ speed×time) which overshot (50mm→70mm).
                         for (const QJsonValue &rv : watched_rails) {
                             QJsonObject p;
                             p["rail"]      = rv.toInt();
-                            p["speed_rpm"] = std::abs(rpm) * (direction >= 0 ? +1 : -1);
-                            rpc_->call("airport.set_speed", p, [](QJsonObject){});
+                            p["dist_mm"]   = std::abs(dist) * (direction >= 0 ? +1.0 : -1.0);
+                            p["speed_rpm"] = std::abs(rpm);
+                            rpc_->call("airport.move_mm", p, [](QJsonObject){});
                         }
-                        const QJsonArray rails_copy = watched_rails;
-                        QTimer::singleShot(time_ms, this, [this, rails_copy]() {
-                            if (!rpc_) return;
-                            for (const QJsonValue &rv : rails_copy) {
-                                QJsonObject sp; sp["rail"] = rv.toInt();
-                                rpc_->call("airport.stop", sp, [](QJsonObject){});
-                            }
-                        });
                     } else {
                         // stall mode: lock/release/set_speed → backend monitor 自动停
                         QJsonObject p;
@@ -1077,6 +1246,26 @@ void StageConfigDialog::onExecuteCurrentStep()
             p["RZ_deg"] = s.params.value("rz_deg").toDouble();
             p["mode"]   = "P";
             rpc_->call(QStringLiteral("piper.move_cartesian"), p, nullCb);
+            break;
+        }
+        case StepType::DOOR:
+        case StepType::HELIPAD: {
+            // Fire the same RPC the orchestrator would. Motion is async on
+            // proc_door, so this returns immediately and the operator
+            // watches the DoorWidget LEDs (or 当前状态 here) for progress.
+            const QString a = s.params.value("action",
+                                             s.type == StepType::DOOR ? "open" : "up").toString();
+            QString method;
+            if (s.type == StepType::DOOR) {
+                if      (a == "close") method = Protocol::Methods::DOOR_CLOSE;
+                else if (a == "stop")  method = Protocol::Methods::DOOR_STOP;
+                else                   method = Protocol::Methods::DOOR_OPEN;
+            } else {
+                if      (a == "down")  method = Protocol::Methods::HELIPAD_DOWN;
+                else if (a == "stop")  method = Protocol::Methods::HELIPAD_STOP;
+                else                   method = Protocol::Methods::HELIPAD_UP;
+            }
+            rpc_->call(method, QJsonObject{}, nullCb);
             break;
         }
     }

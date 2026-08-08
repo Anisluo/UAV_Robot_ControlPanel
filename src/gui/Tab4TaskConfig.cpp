@@ -758,6 +758,50 @@ void Tab4TaskConfig::pollAirportRailDone(const QVector<int> &watched_rails,
         });
 }
 
+void Tab4TaskConfig::pollDoorAxisDone(const QString &axis_key,
+                                       const QString &label,
+                                       int session_run_idx)
+{
+    if (flow_step_run_idx_ != session_run_idx) return;
+    if (!rpc_ || !rpc_->isConnected()) return;
+    rpc_->call(Protocol::Methods::DOOR_GET_STATUS, QJsonObject{},
+        [this, axis_key, label, session_run_idx](QJsonObject reply) {
+            if (flow_step_run_idx_ != session_run_idx) return;
+
+            // proc_door unreachable / module offline: don't spin forever —
+            // let the step's max_ms timer carry the flow forward.
+            if (!reply.value("connected").toBool(false)) {
+                appendLog("warn",
+                    QString("⚠ %1: 继电器模块无响应, 按最长等待推进").arg(label));
+                return;
+            }
+
+            const QJsonObject axis = reply.value(axis_key).toObject();
+            if (!axis.value("moving").toBool(false)) {
+                // Not moving any more. proc_door already de-energised the
+                // coils; reason tells us whether it arrived or gave up.
+                const QString reason = axis.value("reason").toString();
+                const QString state  = axis.value("state").toString();
+                if (reason == "timeout") {
+                    appendLog("warn",
+                        QString("⚠ %1 超时未到位 (state=%2), 后端已断电").arg(label).arg(state));
+                } else {
+                    appendLog("info",
+                        QString("✓ %1 完成 (state=%2), 提前推进").arg(label).arg(state));
+                }
+                if (step_advance_timer_ && step_advance_timer_->isActive()) {
+                    step_advance_timer_->stop();
+                }
+                onFlowStepAdvance();
+                return;
+            }
+            QTimer::singleShot(200, this,
+                [this, axis_key, label, session_run_idx]() {
+                    pollDoorAxisDone(axis_key, label, session_run_idx);
+                });
+        });
+}
+
 // Build the sim playlist: walk each stage in pipeline order; for each
 // stage, expand into either (a) the configured TaskStep script's steps
 // if one was recorded, or (b) the stage's fine-grained demo states as
@@ -865,6 +909,17 @@ QVector<Tab4TaskConfig::SimSegment> Tab4TaskConfig::buildSimPlaylist() const
                             step.params.value("duration_ms", 5000).toInt());
                         seg.label = QStringLiteral("[%1] 定点跟踪 %2ms")
                                         .arg(stage.title).arg(seg.duration_ms);
+                        break;
+                    case StepType::DOOR:
+                    case StepType::HELIPAD:
+                        // No 3-D model for the hatch / lift, so the sim just
+                        // dwells for a plausible travel time.
+                        seg.duration_ms =
+                            (step.params.value("action").toString() == "stop") ? 300 : 2000;
+                        seg.label = QStringLiteral("[%1] %2 %3")
+                                        .arg(stage.title)
+                                        .arg(TaskStep::typeLabel(step.type))
+                                        .arg(step.summary());
                         break;
                 }
                 out.append(std::move(seg));
@@ -1446,20 +1501,24 @@ void Tab4TaskConfig::onFlowStepExecute()
     //     step type fires (MOVE_JOINTS / GRIPPER / DWELL / etc.).
     //   - Otherwise fall back to the legacy fine-state walker with
     //     hardcoded demo poses.
-    if (stage_scripts_.contains(flow_step_selected_stage_) &&
-        !stage_scripts_[flow_step_selected_stage_].isEmpty()) {
-        flow_step_use_script_ = true;
-        flow_step_script_     = stage_scripts_[flow_step_selected_stage_];
-        appendLog("info",
-            QString("使用录制脚本 [%1] (含 %2 步,包含所有类型)")
-                .arg(flow_step_selected_stage_).arg(flow_step_script_.size()));
-    } else {
-        flow_step_use_script_ = false;
-        flow_step_script_.clear();
-        appendLog("info",
-            QString("无录制脚本,fallback 到硬编码 demo 位置 [%1]")
+    // 方案A: 逐 stage 执行只跑录制脚本,与"整套实机运行"完全一致。没有录制
+    // 脚本的 stage 直接跳过(不再回退播放硬编码 demo 动作)——否则"单独执行"
+    // 会播 demo 而"整套运行"会跳过该 stage,导致两者流程对不上。
+    if (!(stage_scripts_.contains(flow_step_selected_stage_) &&
+          !stage_scripts_[flow_step_selected_stage_].isEmpty())) {
+        appendLog("warn",
+            QString("跳过 [%1]: 无录制脚本 (逐 stage 执行只跑录制脚本, 与整套运行一致; "
+                    "请在 ⚙ stage 配置对话框里录制/保存步骤)")
                 .arg(flow_step_selected_stage_));
+        flow_status_label_->setText(
+            QString("单步: ⚠ [%1] 无录制脚本, 已跳过").arg(flow_step_selected_stage_));
+        return;
     }
+    flow_step_use_script_ = true;
+    flow_step_script_     = stage_scripts_[flow_step_selected_stage_];
+    appendLog("info",
+        QString("使用录制脚本 [%1] (含 %2 步,包含所有类型)")
+            .arg(flow_step_selected_stage_).arg(flow_step_script_.size()));
     flow_step_run_idx_ = 0;
     flow_step_prev_joints_.clear();
     const int total = flow_step_use_script_
@@ -1820,45 +1879,36 @@ void Tab4TaskConfig::dispatchScriptStep(const TaskStep &step)
 
             rpc_->call(stop_method, stop_params);
 
-            // Compute the motion time for distance mode using the existing
-            // set_speed RPC + a STOP timer. Formula derived from empirical
-            // calibration on the airport gripper rail (rail 2):
-            //   5s @ 1500rpm → 25 mm  ⇒  5 mm/s @ 1500 rpm
-            //   ⇒ mm/s = rpm / 300,  time_ms = mm × 300000 / rpm
-            // (Factor of 300 — not the 30 you'd expect from a 1mm screw lead
-            //  alone — reflects this rail's microstep × command-scaling
-            //  combination on the ZDT driver. Bump rpm to halve the time.)
-            // 100mm @ 1500rpm → 20s. Works today without redeploying
-            // proc_gateway. Recalibrate by changing the constant below.
+            // Distance mode now uses the gateway's CLOSED-LOOP airport.move_mm
+            // (velocity + 0x36 encoder feedback) which stops at the EXACT
+            // target distance — so this is no longer a stop timer, only a
+            // step-duration estimate (how long to wait before advancing).
+            // Empirically counts/s ≈ rpm × 176.6 at 62922 counts/mm, so the
+            // move takes ≈ dist × 356300 / rpm ms; use 380000 for margin.
             const int distance_time_ms = (stop_mode == "distance" && speed_rpm > 0)
-                ? std::max(100, int(std::abs(distance) * 300000.0 / double(std::abs(speed_rpm))))
+                ? std::max(300, int(std::abs(distance) * 380000.0 / double(std::abs(speed_rpm))))
                 : 0;
 
             const QVector<int> rails_copy = watched_rails;
             QTimer::singleShot(kStallSettleMs, this,
-                [this, action, stop_mode, speed_rpm, direction, distance_time_ms,
+                [this, action, stop_mode, speed_rpm, direction, distance,
                  rails_copy, cb_log_err]() {
                     if (!rpc_) return;
                     if (stop_mode == "distance") {
-                        // Distance mode = set_speed + timer + stop. Use the
-                        // same direction sign as stall mode.
+                        // Distance mode = gateway CLOSED-LOOP precise move
+                        // (airport.move_mm: velocity + 0x36 encoder feedback,
+                        // stops at the exact target). Signed dist_mm carries
+                        // the direction. Replaces the old set_speed + timer +
+                        // stop (distance ≈ speed×time) which overshot badly
+                        // (e.g. 50mm command → 70mm actual).
                         for (int rail_idx : rails_copy) {
                             QJsonObject p;
                             p[Protocol::Fields::RAIL]      = rail_idx;
-                            p[Protocol::Fields::SPEED_RPM] =
-                                std::abs(speed_rpm) * (direction >= 0 ? +1 : -1);
-                            rpc_->call(Protocol::Methods::AIRPORT_SET_SPEED, p, cb_log_err);
+                            p[Protocol::Fields::DIST_MM]   =
+                                std::abs(distance) * (direction >= 0 ? +1.0 : -1.0);
+                            p[Protocol::Fields::SPEED_RPM] = std::abs(speed_rpm);
+                            rpc_->call(Protocol::Methods::AIRPORT_MOVE_MM, p, cb_log_err);
                         }
-                        // Schedule the stop after the computed time.
-                        QTimer::singleShot(distance_time_ms, this,
-                            [this, rails_copy]() {
-                                if (!rpc_) return;
-                                for (int rail_idx : rails_copy) {
-                                    QJsonObject sp;
-                                    sp[Protocol::Fields::RAIL] = rail_idx;
-                                    rpc_->call(Protocol::Methods::AIRPORT_STOP, sp);
-                                }
-                            });
                     } else {
                         // stall mode
                         QJsonObject p;
@@ -1886,12 +1936,23 @@ void Tab4TaskConfig::dispatchScriptStep(const TaskStep &step)
             // 当前 run_idx 实际是 dispatch 时的值 + 1. 不加这个 +1, 下面
             // pollAirportRailDone 里的 (flow_step_run_idx_ != session_run_idx)
             // 守卫会立刻为真, poll 永远跑不起来.
-            const int session_run_idx = flow_step_run_idx_ + 1;
-            QTimer::singleShot(kStallSettleMs + 200, this,
-                [this, watched_rails, stop_mode, name, session_run_idx]() {
-                    if (flow_step_run_idx_ != session_run_idx) return;
-                    pollAirportRailDone(watched_rails, stop_mode, name, session_run_idx);
-                });
+            // Status-poll early-advance is ONLY for stall mode (advance the
+            // instant the rail stalls). DISTANCE mode must NOT poll: the
+            // gateway's airport.move_mm stops at the exact target and we
+            // advance on the duration_ms timer. The device gateway has no real
+            // airport.get_status — it ACKs unknown methods with {"ok":true}
+            // and NO "rails", so for distance mode the poll reads state=IDLE,
+            // falsely "completes" immediately, stop()s the step-advance timer,
+            // and the whole flow STALLS after this step (the "导轨2 stage 之后
+            // 后面 stage 不执行" bug). So skip polling for distance.
+            if (stop_mode != "distance") {
+                const int session_run_idx = flow_step_run_idx_ + 1;
+                QTimer::singleShot(kStallSettleMs + 200, this,
+                    [this, watched_rails, stop_mode, name, session_run_idx]() {
+                        if (flow_step_run_idx_ != session_run_idx) return;
+                        pollAirportRailDone(watched_rails, stop_mode, name, session_run_idx);
+                    });
+            }
 
             const QString mode_label = (stop_mode == "distance")
                 ? QString("固定 %1mm (~%2ms)").arg(std::abs(distance), 0, 'f', 1).arg(distance_time_ms)
@@ -1900,6 +1961,64 @@ void Tab4TaskConfig::dispatchScriptStep(const TaskStep &step)
                 QString("▶ [%1/%2] AIRPORT_RAIL %3 @ %4rpm  %5  (%6ms 急停 + 最长 %7ms)%8")
                     .arg(step_num).arg(total).arg(name).arg(speed_rpm)
                     .arg(mode_label).arg(kStallSettleMs).arg(max_ms).arg(note));
+            break;
+        }
+        case StepType::DOOR:
+        case StepType::HELIPAD: {
+            // 舱门 / 停机坪 — proc_door over RS485. Motion is asynchronous
+            // there: the RPC returns once the coils are set, and proc_door
+            // supervises its own limit switches (X3/X4 hatch, X1/X2 lift)
+            // and cuts power on arrival or timeout. So we fire the command,
+            // then poll door.get_status and advance the instant the axis
+            // reports moving=false — max_ms is only the fallback bound.
+            const bool is_door = (step.type == StepType::DOOR);
+            const QString action =
+                step.params.value("action", is_door ? "open" : "up").toString();
+            const int max_ms = std::max(500,
+                step.params.value("max_ms", is_door ? 20000 : 30000).toInt());
+
+            QString method;
+            QString name;
+            if (is_door) {
+                if (action == "close")      { method = Protocol::Methods::DOOR_CLOSE;   name = "关舱门"; }
+                else if (action == "stop")  { method = Protocol::Methods::DOOR_STOP;    name = "舱门停止"; }
+                else                        { method = Protocol::Methods::DOOR_OPEN;    name = "开舱门"; }
+            } else {
+                if (action == "down")       { method = Protocol::Methods::HELIPAD_DOWN; name = "停机坪下降"; }
+                else if (action == "stop")  { method = Protocol::Methods::HELIPAD_STOP; name = "停机坪停止"; }
+                else                        { method = Protocol::Methods::HELIPAD_UP;   name = "停机坪上升"; }
+            }
+
+            rpc_->call(method, QJsonObject{}, cb_log_err);
+
+            if (action == "stop") {
+                // De-energising is instantaneous — nothing to wait for.
+                duration_ms = 300;
+                appendLog("info",
+                    QString("▶ [%1/%2] %3%4").arg(step_num).arg(total).arg(name).arg(note));
+                break;
+            }
+
+            duration_ms = max_ms;
+
+            // +1 for the same reason as AIRPORT_RAIL: the caller bumps
+            // flow_step_run_idx_ right after dispatchScriptStep returns, so
+            // "still on this step" is the dispatch-time value + 1.
+            const int session_run_idx = flow_step_run_idx_ + 1;
+            const QString axis_key = is_door ? QStringLiteral("hatch")
+                                             : QStringLiteral("helipad");
+            // Give proc_door a beat to flip moving=true before the first
+            // poll, otherwise we'd read the pre-command idle state and
+            // "complete" instantly.
+            QTimer::singleShot(400, this,
+                [this, axis_key, name, session_run_idx]() {
+                    if (flow_step_run_idx_ != session_run_idx) return;
+                    pollDoorAxisDone(axis_key, name, session_run_idx);
+                });
+
+            appendLog("info",
+                QString("▶ [%1/%2] %3 → 等限位 (最长 %4ms)%5")
+                    .arg(step_num).arg(total).arg(name).arg(max_ms).arg(note));
             break;
         }
         case StepType::MOVE_CARTESIAN:

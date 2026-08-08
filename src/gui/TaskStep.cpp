@@ -21,6 +21,8 @@ QString TaskStep::typeLabel(StepType t)
         case StepType::WAIT_DETECT_BAT: return QStringLiteral("等待识别电池");
         case StepType::DWELL:           return QStringLiteral("延时");
         case StepType::FIX_POINT:       return QStringLiteral("定点跟踪");
+        case StepType::DOOR:            return QStringLiteral("舱门");
+        case StepType::HELIPAD:         return QStringLiteral("停机坪升降");
     }
     return QStringLiteral("?");
 }
@@ -90,6 +92,20 @@ QString TaskStep::summary() const
                 .arg(params.value("y_mm").toDouble(), 0, 'f', 1)
                 .arg(params.value("z_mm").toDouble(), 0, 'f', 1)
                 .arg(params.value("duration_ms").toInt());
+        case StepType::DOOR: {
+            const QString a = params.value("action", "open").toString();
+            if (a == "stop") return QStringLiteral("舱门 停止");
+            return QStringLiteral("%1  → 等限位 (最长 %2s)")
+                .arg(a == "close" ? QStringLiteral("关舱门") : QStringLiteral("开舱门"))
+                .arg(params.value("max_ms", 20000).toInt() / 1000.0, 0, 'f', 1);
+        }
+        case StepType::HELIPAD: {
+            const QString a = params.value("action", "up").toString();
+            if (a == "stop") return QStringLiteral("停机坪 停止");
+            return QStringLiteral("停机坪 %1  → 等限位 (最长 %2s)")
+                .arg(a == "down" ? QStringLiteral("下降") : QStringLiteral("上升"))
+                .arg(params.value("max_ms", 30000).toInt() / 1000.0, 0, 'f', 1);
+        }
     }
     return {};
 }

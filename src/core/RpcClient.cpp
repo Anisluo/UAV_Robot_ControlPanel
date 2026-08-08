@@ -107,6 +107,7 @@ bool RpcClient::isHighRatePollMethod(const QString &method)
         "npu.get_detections",
         "system.ping",
         "task.get_status",
+        "door.get_status",
     };
     return kQuiet.contains(method);
 }

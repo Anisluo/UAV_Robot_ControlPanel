@@ -108,6 +108,14 @@ private:
                              const QString &mode,
                              const QString &label,
                              int session_run_idx);
+
+    // Same idea for the proc_door axes. Polls door.get_status and advances
+    // as soon as the axis reports moving=false — proc_door supervises its
+    // own limit switches and cuts power on arrival, so "stopped moving" is
+    // the completion signal. axis_key is "hatch" or "helipad".
+    void pollDoorAxisDone(const QString &axis_key,
+                          const QString &label,
+                          int session_run_idx);
     struct SimSegment;
     QVector<SimSegment> buildSimPlaylist() const;
     QWidget* build3DViewer();

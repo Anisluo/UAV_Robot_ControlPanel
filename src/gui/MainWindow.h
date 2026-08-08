@@ -13,9 +13,11 @@ class ArmWidget;
 class PiperWidget;
 class UGVWidget;
 class AirportWidget;
+class DoorWidget;
 class GripperWidget;
 class MeshMapWidget;
 class DroneWidget;
+class MapWidget;
 class CalibWidget;
 class TeachWidget;
 class Tab2CommConfig;
@@ -79,10 +81,12 @@ private:
     QWidget      *dashboard_tab_ = nullptr;       // pointer for tab compare
     QSplitter    *dash_left_splitter_ = nullptr;  // owner when on dashboard
     LogWidget    *log_widget_;
+    MapWidget    *map_widget_ = nullptr;          // 无人机地图 (below camera)
     ArmWidget    *arm_widget_;
     PiperWidget  *piper_widget_ = nullptr;   // gen-2 arm widget (shown when backend=piper)
     UGVWidget    *ugv_widget_;
     AirportWidget *airport_widget_;
+    DoorWidget    *door_widget_;      // 舱门 / 停机坪 (proc_door, RS485)
     GripperWidget *gripper_widget_;
     MeshMapWidget *mesh_widget_;
     DroneWidget   *drone_widget_;

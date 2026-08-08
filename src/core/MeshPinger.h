@@ -12,7 +12,7 @@ class QTimer;
 class QProcess;
 
 /*
- * MeshPinger — periodically pings 192.168.1.101..106 in parallel.
+ * MeshPinger — periodically pings 192.168.200.101..106 in parallel.
  *
  * On each cycle all 6 pings are launched simultaneously (ping -c1 -W1).
  * When every process finishes the nodesUpdated() signal is emitted with

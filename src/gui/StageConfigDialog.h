@@ -133,6 +133,24 @@ private:
     QDoubleSpinBox *fp_rz_     = nullptr;
     QSpinBox       *fp_duration_ms_ = nullptr;
     QPushButton    *btn_fp_record_  = nullptr;   // "录当前 TCP 为目标点"
+
+    // DOOR (舱门) / HELIPAD (停机坪升降) — both drive proc_door over RS485.
+    // "录当前状态" reads door.get_status and picks the action matching the
+    // position the axis is sitting at right now, the same way the arm's
+    // 录当前关节 captures the live pose.
+    QComboBox      *dr_action_      = nullptr;   // open / close / stop
+    QSpinBox       *dr_max_ms_      = nullptr;
+    QLabel         *dr_state_       = nullptr;   // live 状态回显
+    QPushButton    *btn_dr_record_  = nullptr;
+
+    QComboBox      *hp_action_      = nullptr;   // up / down / stop
+    QSpinBox       *hp_max_ms_      = nullptr;
+    QLabel         *hp_state_       = nullptr;
+    QPushButton    *btn_hp_record_  = nullptr;
+
+    // Shared helper for the two 录当前状态 buttons: query door.get_status
+    // and set the given combo to the action matching the reported position.
+    void recordDoorState(bool helipad);
 };
 
 #endif // STAGECONFIGDIALOG_H
