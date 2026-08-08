@@ -5,6 +5,7 @@
 #include <QFrame>
 #include <QGridLayout>
 #include <QHBoxLayout>
+#include <QJsonArray>
 #include <QJsonObject>
 #include <QLabel>
 #include <QPushButton>
@@ -166,6 +167,49 @@ void AirportWidget::buildUi()
 
     mainLayout->addWidget(gripperPanel);
 
+    // ── 归零面板 ────────────────────────────────────────────────────────
+    // The drivers' multi-turn encoder count is NOT retentive — it restarts
+    // from 0 whenever the rail drivers are power-cycled, and their
+    // power-on auto-homing is disabled. So any absolute position is
+    // meaningless until the rails have been driven to a known physical
+    // reference. This runs them to the release-side hard stop and latches
+    // the count there as zero.
+    auto *homePanel = makePanel();
+    auto *homeLayout = new QVBoxLayout(homePanel);
+    homeLayout->setSpacing(6);
+
+    auto *homeHead = new QHBoxLayout;
+    homeHead->addWidget(makeTitle("归零 (导轨1 + 导轨3)"));
+    homeHead->addStretch();
+    home_state_ = new QLabel("未归零", this);
+    home_state_->setStyleSheet("color:#e0a030; font-family: Consolas; font-weight:bold;");
+    homeHead->addWidget(home_state_);
+    homeLayout->addLayout(homeHead);
+
+    auto *homeRow = new QHBoxLayout;
+    home_btn_ = new QPushButton("归零 (跑到释放端硬限位)", this);
+    home_btn_->setFixedHeight(32);
+    home_btn_->setToolTip(
+        QStringLiteral("驱动导轨1和导轨3 往释放方向跑到硬限位, 把该处编码器计数记为零点。\n"
+                       "导轨驱动器重新上电后必须做一次 —— 它们的多圈计数会从 0 重新开始, "
+                       "且固件的上电自动回零没有开启。\n"
+                       "整段行程可能要十几秒。"));
+    home_btn_->setStyleSheet(
+        "QPushButton { background:#2f6f9f; color:white; font-weight:bold;"
+        "              padding:4px 12px; border-radius:4px; }"
+        "QPushButton:hover { background:#3a83b8; }"
+        "QPushButton:disabled { background:#3a3d52; color:#7c7f96; }");
+    homeRow->addWidget(home_btn_, 1);
+    homeLayout->addLayout(homeRow);
+
+    auto *homeHint = new QLabel(
+        "归零后, 导轨位置以 mm 显示 (相对释放端硬限位)。未归零时显示 --。", this);
+    homeHint->setWordWrap(true);
+    homeHint->setStyleSheet("color: #888aaa;");
+    homeLayout->addWidget(homeHint);
+
+    mainLayout->addWidget(homePanel);
+
     auto *btnRow = new QHBoxLayout;
     stop_all_btn_ = new QPushButton("全部急停", this);
     stop_all_btn_->setFixedHeight(30);
@@ -182,6 +226,13 @@ void AirportWidget::buildUi()
     connect(rail2_fwd_btn_, &QPushButton::clicked, this, [this]() { onRail2Move(true); });
     connect(rail2_back_btn_, &QPushButton::clicked, this, [this]() { onRail2Move(false); });
     connect(stop_all_btn_, &QPushButton::clicked, this, &AirportWidget::onStopAll);
+    connect(home_btn_,     &QPushButton::clicked, this, &AirportWidget::onHomeRails);
+
+    // Poll only while a homing run is in flight — the rest of the time this
+    // widget stays quiet rather than adding another periodic RPC.
+    home_timer_ = new QTimer(this);
+    home_timer_->setInterval(500);
+    connect(home_timer_, &QTimer::timeout, this, &AirportWidget::pollHomeStatus);
     connect(gripper_open_btn_,  &QPushButton::clicked, this, [this]() { onGripper(true);  });
     connect(gripper_close_btn_, &QPushButton::clicked, this, [this]() { onGripper(false); });
 }
@@ -273,6 +324,71 @@ void AirportWidget::onStopAll()
 {
     if (!rpc_ || !rpc_->isConnected()) return;
     rpc_->call(Protocol::Methods::AIRPORT_STOP_ALL, QJsonObject{});
+    if (home_timer_) home_timer_->stop();
+    if (home_btn_)   home_btn_->setEnabled(true);
+}
+
+void AirportWidget::onHomeRails()
+{
+    if (!rpc_ || !rpc_->isConnected()) return;
+
+    home_btn_->setEnabled(false);
+    home_state_->setText("归零中…");
+    home_state_->setStyleSheet("color:#e0a030; font-family: Consolas; font-weight:bold;");
+
+    QJsonObject params;
+    // Deliberately slow: this drives into a hard stop, and the whole point
+    // is to land on it gently rather than hammer it.
+    params[Protocol::Fields::SPEED_RPM] = 150;
+    rpc_->call(Protocol::Methods::AIRPORT_HOME_RAILS, params,
+        [this](QJsonObject reply) {
+            if (!reply.value("ok").toBool(false)) {
+                home_state_->setText("归零启动失败");
+                home_state_->setStyleSheet(
+                    "color:#e05050; font-family: Consolas; font-weight:bold;");
+                home_btn_->setEnabled(true);
+                return;
+            }
+            if (home_timer_) home_timer_->start();
+        });
+}
+
+void AirportWidget::pollHomeStatus()
+{
+    if (!rpc_ || !rpc_->isConnected()) {
+        home_timer_->stop();
+        home_btn_->setEnabled(true);
+        return;
+    }
+    rpc_->call(Protocol::Methods::AIRPORT_GET_STATUS, QJsonObject{},
+        [this](QJsonObject reply) {
+            if (reply.value("homing").toBool(false)) return;   // still running
+
+            home_timer_->stop();
+            home_btn_->setEnabled(true);
+            if (reply.value("homed").toBool(false)) {
+                // Positions come back relative to the freshly latched zero,
+                // so right after homing they should both read ~0.
+                const QJsonArray rails = reply.value("rails").toArray();
+                QString detail;
+                for (const QJsonValue &v : rails) {
+                    const QJsonObject o = v.toObject();
+                    const int idx = o.value("index").toInt(-1);
+                    if (idx != 0 && idx != 2) continue;
+                    if (o.value(Protocol::Fields::POS_MM).isNull()) continue;
+                    detail += QString("  导轨%1=%2mm")
+                                  .arg(idx + 1)
+                                  .arg(o.value(Protocol::Fields::POS_MM).toDouble(), 0, 'f', 1);
+                }
+                home_state_->setText("已归零" + detail);
+                home_state_->setStyleSheet(
+                    "color:#3ac06a; font-family: Consolas; font-weight:bold;");
+            } else {
+                home_state_->setText("归零未完成 (超时/被中断)");
+                home_state_->setStyleSheet(
+                    "color:#e05050; font-family: Consolas; font-weight:bold;");
+            }
+        });
 }
 
 void AirportWidget::onGripper(bool open)

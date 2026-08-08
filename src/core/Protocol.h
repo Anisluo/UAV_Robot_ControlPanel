@@ -48,6 +48,11 @@ namespace Methods {
     constexpr const char* AIRPORT_GET_STATUS = "airport.get_status";   // per-rail state poll
     constexpr const char* AIRPORT_MOVE_DISTANCE = "airport.move_distance"; // open-loop relative N mm
     constexpr const char* AIRPORT_MOVE_MM    = "airport.move_mm";      // closed-loop precise relative N mm (velocity + 0x36 feedback)
+    // 归零: run the clamp pair to the release-side hard stop and latch
+    // the encoder zero there. Needed after the rail drivers are
+    // power-cycled — their multi-turn count restarts from 0 and the
+    // drivers have power-on auto-homing disabled.
+    constexpr const char* AIRPORT_HOME_RAILS = "airport.home_rails";
     constexpr const char* ARM_GRIPPER_SET    = "arm_gripper.set";
     // 舱门 / 停机坪 — proc_door over RS485 Modbus RTU. Motion is async on
     // the backend: these return once the coils are set, and proc_door's
