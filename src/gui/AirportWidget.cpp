@@ -63,9 +63,9 @@ void AirportWidget::buildUi()
     lock_spin_->setValue(300);
     lock_spin_->setFixedWidth(90);
 
-    lock_btn_ = new QPushButton("锁定", this);
+    lock_btn_ = new QPushButton("锁定 (+)", this);
     lock_btn_->setFixedHeight(28);
-    release_btn_ = new QPushButton("释放", this);
+    release_btn_ = new QPushButton("释放 (−)", this);
     release_btn_->setFixedHeight(28);
 
     pairGrid->addWidget(pairLabel, 0, 0);
@@ -76,7 +76,7 @@ void AirportWidget::buildUi()
     pairGrid->setColumnStretch(1, 1);
     pairLayout->addLayout(pairGrid);
 
-    auto *pairHint = new QLabel("锁定: 导轨1/3 正向运行；释放: 导轨1/3 反向运行。后端会轮询驱动堵转状态，检测到堵转保护后自动停止对应导轨。", this);
+    auto *pairHint = new QLabel("锁定(+) / 释放(−) 驱动导轨1+3 联动。<b>负方向统一是归零方向</b>。后端轮询驱动器堵转状态，检测到堵转保护后自动停止对应导轨。", this);
     pairHint->setWordWrap(true);
     pairHint->setStyleSheet("color: #888aaa;");
     pairLayout->addWidget(pairHint);
@@ -105,9 +105,9 @@ void AirportWidget::buildUi()
     rail2_spin_->setValue(300);
     rail2_spin_->setFixedWidth(90);
 
-    rail2_fwd_btn_ = new QPushButton("前进", this);
+    rail2_fwd_btn_ = new QPushButton("正向 (+)", this);
     rail2_fwd_btn_->setFixedHeight(28);
-    rail2_back_btn_ = new QPushButton("后退", this);
+    rail2_back_btn_ = new QPushButton("负向 (−)", this);
     rail2_back_btn_->setFixedHeight(28);
 
     rail2Grid->addWidget(rail2Label, 0, 0);
@@ -118,7 +118,28 @@ void AirportWidget::buildUi()
     rail2Grid->setColumnStretch(1, 1);
     rail2Layout->addLayout(rail2Grid);
 
-    auto *rail2Hint = new QLabel("导轨2 继续使用单独速度控制，前进/后退直接发送速度命令。", this);
+    // 导轨2 归零 — deliberately its own button, not ganged with the 1/3
+    // pair: different lead screw, its own hard stop, its own zero.
+    auto *rail2HomeRow = new QHBoxLayout;
+    rail2HomeRow->setSpacing(8);
+    home_rail2_btn_ = new QPushButton("导轨2 归零", this);
+    home_rail2_btn_->setFixedHeight(28);
+    home_rail2_btn_->setToolTip(
+        QStringLiteral("驱动导轨2 跑到自己的硬限位, 把该处编码器计数记为零点。\n"
+                       "与导轨1/3 的归零互不影响。方向由 UAV_AIRPORT_RAIL2_HOME_DIR 决定。"));
+    home_rail2_btn_->setStyleSheet(
+        "QPushButton { background:#2f6f9f; color:white; font-weight:bold;"
+        "              padding:4px 10px; border-radius:4px; }"
+        "QPushButton:hover { background:#3a83b8; }"
+        "QPushButton:disabled { background:#3a3d52; color:#7c7f96; }");
+    home_rail2_state_ = new QLabel("未归零", this);
+    home_rail2_state_->setStyleSheet("color:#e0a030; font-family: Consolas; font-weight:bold;");
+    rail2HomeRow->addWidget(home_rail2_btn_);
+    rail2HomeRow->addWidget(home_rail2_state_);
+    rail2HomeRow->addStretch();
+    rail2Layout->addLayout(rail2HomeRow);
+
+    auto *rail2Hint = new QLabel("导轨2 单独速度控制。正向(+) 远离零点，负向(−) 朝零点 —— 与 airport.move_mm 的 dist_mm 符号、以及 pos_mm 的正负完全一致。", this);
     rail2Hint->setWordWrap(true);
     rail2Hint->setStyleSheet("color: #888aaa;");
     rail2Layout->addWidget(rail2Hint);
@@ -226,7 +247,8 @@ void AirportWidget::buildUi()
     connect(rail2_fwd_btn_, &QPushButton::clicked, this, [this]() { onRail2Move(true); });
     connect(rail2_back_btn_, &QPushButton::clicked, this, [this]() { onRail2Move(false); });
     connect(stop_all_btn_, &QPushButton::clicked, this, &AirportWidget::onStopAll);
-    connect(home_btn_,     &QPushButton::clicked, this, &AirportWidget::onHomeRails);
+    connect(home_btn_,       &QPushButton::clicked, this, &AirportWidget::onHomeRails);
+    connect(home_rail2_btn_, &QPushButton::clicked, this, &AirportWidget::onHomeRail2);
 
     // Poll only while a homing run is in flight — the rest of the time this
     // widget stays quiet rather than adding another periodic RPC.
@@ -353,40 +375,89 @@ void AirportWidget::onHomeRails()
         });
 }
 
+void AirportWidget::onHomeRail2()
+{
+    if (!rpc_ || !rpc_->isConnected()) return;
+
+    home_rail2_btn_->setEnabled(false);
+    home_rail2_state_->setText("归零中…");
+    home_rail2_state_->setStyleSheet("color:#e0a030; font-family: Consolas; font-weight:bold;");
+
+    QJsonObject params;
+    params[Protocol::Fields::SPEED_RPM] = 150;   // slow — it drives into a hard stop
+    rpc_->call(Protocol::Methods::AIRPORT_HOME_RAIL2, params,
+        [this](QJsonObject reply) {
+            if (!reply.value("ok").toBool(false)) {
+                home_rail2_state_->setText("启动失败");
+                home_rail2_state_->setStyleSheet(
+                    "color:#e05050; font-family: Consolas; font-weight:bold;");
+                home_rail2_btn_->setEnabled(true);
+                return;
+            }
+            if (home_timer_) home_timer_->start();
+        });
+}
+
+// Shared poll for both homing buttons: the backend reports per-rail
+// homing/homed, so one timer can drive both panels. It stops once no rail
+// is homing any more.
 void AirportWidget::pollHomeStatus()
 {
     if (!rpc_ || !rpc_->isConnected()) {
         home_timer_->stop();
         home_btn_->setEnabled(true);
+        home_rail2_btn_->setEnabled(true);
         return;
     }
     rpc_->call(Protocol::Methods::AIRPORT_GET_STATUS, QJsonObject{},
         [this](QJsonObject reply) {
-            if (reply.value("homing").toBool(false)) return;   // still running
+            const QJsonArray rails = reply.value("rails").toArray();
 
-            home_timer_->stop();
-            home_btn_->setEnabled(true);
-            if (reply.value("homed").toBool(false)) {
-                // Positions come back relative to the freshly latched zero,
-                // so right after homing they should both read ~0.
-                const QJsonArray rails = reply.value("rails").toArray();
-                QString detail;
+            auto railObj = [&rails](int index) {
                 for (const QJsonValue &v : rails) {
                     const QJsonObject o = v.toObject();
-                    const int idx = o.value("index").toInt(-1);
-                    if (idx != 0 && idx != 2) continue;
-                    if (o.value(Protocol::Fields::POS_MM).isNull()) continue;
-                    detail += QString("  导轨%1=%2mm")
-                                  .arg(idx + 1)
-                                  .arg(o.value(Protocol::Fields::POS_MM).toDouble(), 0, 'f', 1);
+                    if (o.value("index").toInt(-1) == index) return o;
                 }
-                home_state_->setText("已归零" + detail);
-                home_state_->setStyleSheet(
-                    "color:#3ac06a; font-family: Consolas; font-weight:bold;");
-            } else {
-                home_state_->setText("归零未完成 (超时/被中断)");
-                home_state_->setStyleSheet(
-                    "color:#e05050; font-family: Consolas; font-weight:bold;");
+                return QJsonObject{};
+            };
+            auto posText = [](const QJsonObject &o) {
+                const QJsonValue p = o.value(Protocol::Fields::POS_MM);
+                return p.isNull() ? QString()
+                                  : QString("=%1mm").arg(p.toDouble(), 0, 'f', 1);
+            };
+            auto paint = [](QLabel *lbl, const QString &text, const char *color) {
+                lbl->setText(text);
+                lbl->setStyleSheet(
+                    QString("color:%1; font-family: Consolas; font-weight:bold;").arg(color));
+            };
+
+            // ── 导轨1 + 导轨3 ──
+            const QJsonObject r0 = railObj(0), r2 = railObj(2);
+            if (!r0.value("homing").toBool(false) && !r2.value("homing").toBool(false)) {
+                home_btn_->setEnabled(true);
+                if (r0.value("homed").toBool(false) && r2.value("homed").toBool(false)) {
+                    paint(home_state_,
+                          QString("已归零  导轨1%1  导轨3%2")
+                              .arg(posText(r0)).arg(posText(r2)),
+                          "#3ac06a");
+                } else if (home_state_->text() == "归零中…") {
+                    paint(home_state_, "归零未完成 (超时/被中断)", "#e05050");
+                }
+            }
+
+            // ── 导轨2 ──
+            const QJsonObject r1 = railObj(1);
+            if (!r1.value("homing").toBool(false)) {
+                home_rail2_btn_->setEnabled(true);
+                if (r1.value("homed").toBool(false)) {
+                    paint(home_rail2_state_, "已归零" + posText(r1), "#3ac06a");
+                } else if (home_rail2_state_->text() == "归零中…") {
+                    paint(home_rail2_state_, "归零未完成", "#e05050");
+                }
+            }
+
+            if (!reply.value("homing").toBool(false)) {
+                home_timer_->stop();
             }
         });
 }

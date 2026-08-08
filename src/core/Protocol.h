@@ -53,6 +53,8 @@ namespace Methods {
     // power-cycled — their multi-turn count restarts from 0 and the
     // drivers have power-on auto-homing disabled.
     constexpr const char* AIRPORT_HOME_RAILS = "airport.home_rails";
+    // 导轨2 归零 — 独立于 1/3 夹紧对, 自己的硬限位、自己的零点
+    constexpr const char* AIRPORT_HOME_RAIL2 = "airport.home_rail2";
     constexpr const char* ARM_GRIPPER_SET    = "arm_gripper.set";
     // 舱门 / 停机坪 — proc_door over RS485 Modbus RTU. Motion is async on
     // the backend: these return once the coils are set, and proc_door's

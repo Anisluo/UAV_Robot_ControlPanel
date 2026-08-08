@@ -26,6 +26,7 @@ private slots:
     void onRail2Move(bool forward);
     void onStopAll();
     void onHomeRails();          // 归零 — 跑到释放端硬限位并latch零点
+    void onHomeRail2();          // 导轨2 独立归零
     void pollHomeStatus();       // 归零期间轮询 airport.get_status
     void onGripper(bool open);   // relay-driven airport jaw (proc_gateway/airport.gripper)
 
@@ -44,6 +45,8 @@ private:
     QPushButton *rail2_back_btn_{nullptr};
     QPushButton *stop_all_btn_{nullptr};
     QPushButton *home_btn_{nullptr};
+    QPushButton *home_rail2_btn_{nullptr};
+    QLabel      *home_rail2_state_{nullptr};
     QLabel      *home_state_{nullptr};
     QTimer      *home_timer_{nullptr};
     QPushButton *gripper_open_btn_{nullptr};   // relay → 开 (jaw open)
