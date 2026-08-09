@@ -62,13 +62,18 @@ QString TaskStep::summary() const
             const int rpm = params.value("speed_rpm", 1500).toInt();
             const QString stop_mode = params.value("stop_mode", "stall").toString();
             QString name;
-            if      (action == "release")     name = QStringLiteral("平台释放(1+3)");
-            else if (action == "rail2_fwd")   name = QStringLiteral("机场夹爪导轨 前进");
-            else if (action == "rail2_back")  name = QStringLiteral("机场夹爪导轨 后退");
-            else                              name = QStringLiteral("平台锁定(1+3)");
+            if      (action == "release")     name = QStringLiteral("平台释放(−)(1+3)");
+            else if (action == "rail2_fwd")   name = QStringLiteral("机场夹爪导轨 正向(+)");
+            else if (action == "rail2_back")  name = QStringLiteral("机场夹爪导轨 负向(−)");
+            else                              name = QStringLiteral("平台锁定(+)(1+3)");
+            if (stop_mode == "position") {
+                const double pos = params.value("position_mm", 100.0).toDouble();
+                return QStringLiteral("%1 @ %2rpm  → 到 %3mm (距零点)")
+                    .arg(name).arg(rpm).arg(pos, 0, 'f', 1);
+            }
             if (stop_mode == "distance") {
                 const double dist = params.value("distance_mm", 50.0).toDouble();
-                return QStringLiteral("%1 @ %2rpm  → %3mm").arg(name).arg(rpm).arg(dist, 0, 'f', 1);
+                return QStringLiteral("%1 @ %2rpm  → 相对 %3mm").arg(name).arg(rpm).arg(dist, 0, 'f', 1);
             }
             return QStringLiteral("%1 @ %2rpm  → 堵转停").arg(name).arg(rpm);
         }

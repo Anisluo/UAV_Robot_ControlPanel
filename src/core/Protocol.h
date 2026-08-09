@@ -48,6 +48,10 @@ namespace Methods {
     constexpr const char* AIRPORT_GET_STATUS = "airport.get_status";   // per-rail state poll
     constexpr const char* AIRPORT_MOVE_DISTANCE = "airport.move_distance"; // open-loop relative N mm
     constexpr const char* AIRPORT_MOVE_MM    = "airport.move_mm";      // closed-loop precise relative N mm (velocity + 0x36 feedback)
+    // 绝对位置: go to pos_mm measured from the homed zero. The gateway reads
+    // the encoder and works out the delta itself, so no read→compute→command
+    // race in the GUI. Refused (ok:false) when the rail has never been homed.
+    constexpr const char* AIRPORT_MOVE_TO_MM = "airport.move_to_mm";
     // 归零: run the clamp pair to the release-side hard stop and latch
     // the encoder zero there. Needed after the rail drivers are
     // power-cycled — their multi-turn count restarts from 0 and the

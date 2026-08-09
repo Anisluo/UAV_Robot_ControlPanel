@@ -2,6 +2,7 @@
 #include "core/RpcClient.h"
 #include "core/Protocol.h"
 
+#include <QDoubleSpinBox>
 #include <QFrame>
 #include <QGridLayout>
 #include <QHBoxLayout>
@@ -139,6 +140,40 @@ void AirportWidget::buildUi()
     rail2HomeRow->addStretch();
     rail2Layout->addLayout(rail2HomeRow);
 
+    // 绝对位置 — 填 mm, 点按钮走到距零点该处。The gateway reads the encoder,
+    // works out the delta and drives it closed-loop; we never compute the
+    // delta here, so nothing can go stale between reading and commanding.
+    auto *rail2GotoRow = new QHBoxLayout;
+    rail2GotoRow->setSpacing(6);
+    auto *gotoLabel = new QLabel("绝对位置", this);
+    gotoLabel->setFixedWidth(65);
+    rail2_pos_spin_ = new QDoubleSpinBox(this);
+    rail2_pos_spin_->setRange(0.0, 150.0);      // 导轨2 总行程 150mm, 零点=释放端硬限位
+    rail2_pos_spin_->setDecimals(1);
+    rail2_pos_spin_->setSingleStep(1.0);
+    rail2_pos_spin_->setValue(50.0);
+    rail2_pos_spin_->setSuffix(" mm");
+    rail2_pos_spin_->setFixedWidth(100);
+    rail2_pos_spin_->setToolTip(
+        QStringLiteral("距零点的绝对距离。零点 = 归零时撞到的那个硬限位。\n"
+                       "0 就是零点本身; 不能填负数 (那是往硬限位里顶)。"));
+    rail2_goto_btn_ = new QPushButton("走到该位置", this);
+    rail2_goto_btn_->setFixedHeight(28);
+    rail2_goto_btn_->setToolTip(
+        QStringLiteral("闭环走到距零点指定 mm 处 (airport.move_to_mm)。\n"
+                       "速度用上面那个 rpm。必须先归零, 否则网关会拒绝 ——\n"
+                       "驱动器的多圈计数掉电不保持, 没归零的\"50mm\"只是个任意偏移。"));
+    rail2_goto_btn_->setStyleSheet(
+        "QPushButton { background:#2f8f6f; color:white; font-weight:bold;"
+        "              padding:4px 10px; border-radius:4px; }"
+        "QPushButton:hover { background:#38a882; }"
+        "QPushButton:disabled { background:#3a3d52; color:#7c7f96; }");
+    rail2GotoRow->addWidget(gotoLabel);
+    rail2GotoRow->addWidget(rail2_pos_spin_);
+    rail2GotoRow->addWidget(rail2_goto_btn_);
+    rail2GotoRow->addStretch();
+    rail2Layout->addLayout(rail2GotoRow);
+
     auto *rail2Hint = new QLabel("导轨2 单独速度控制。正向(+) 远离零点，负向(−) 朝零点 —— 与 airport.move_mm 的 dist_mm 符号、以及 pos_mm 的正负完全一致。", this);
     rail2Hint->setWordWrap(true);
     rail2Hint->setStyleSheet("color: #888aaa;");
@@ -249,12 +284,20 @@ void AirportWidget::buildUi()
     connect(stop_all_btn_, &QPushButton::clicked, this, &AirportWidget::onStopAll);
     connect(home_btn_,       &QPushButton::clicked, this, &AirportWidget::onHomeRails);
     connect(home_rail2_btn_, &QPushButton::clicked, this, &AirportWidget::onHomeRail2);
+    connect(rail2_goto_btn_, &QPushButton::clicked, this, &AirportWidget::onRail2GoTo);
 
     // Poll only while a homing run is in flight — the rest of the time this
     // widget stays quiet rather than adding another periodic RPC.
     home_timer_ = new QTimer(this);
     home_timer_->setInterval(500);
     connect(home_timer_, &QTimer::timeout, this, &AirportWidget::pollHomeStatus);
+
+    // Same idea for an absolute move: poll only while one is running. Its
+    // own timer, because pollHomeStatus stops itself on homing==false and a
+    // move_to_mm run has homing==false the whole time.
+    rail2_move_timer_ = new QTimer(this);
+    rail2_move_timer_->setInterval(300);
+    connect(rail2_move_timer_, &QTimer::timeout, this, &AirportWidget::pollRail2Move);
     connect(gripper_open_btn_,  &QPushButton::clicked, this, [this]() { onGripper(true);  });
     connect(gripper_close_btn_, &QPushButton::clicked, this, [this]() { onGripper(false); });
 }
@@ -395,6 +438,90 @@ void AirportWidget::onHomeRail2()
                 return;
             }
             if (home_timer_) home_timer_->start();
+        });
+}
+
+// 导轨2 走到绝对位置。The target is resolved by the gateway
+// (airport.move_to_mm): it reads the encoder, subtracts the latched zero
+// and drives the difference closed-loop. Nothing here computes a delta, so
+// there is no window where a stale position turns into a wrong move.
+//
+// The gateway refuses outright when the rail has never been homed. That is
+// not a nicety — the drivers' multi-turn count restarts at 0 on power-up
+// with auto-homing disabled, so an un-homed "50 mm" is 50 mm from wherever
+// the rail happened to sit when the driver last booted.
+void AirportWidget::onRail2GoTo()
+{
+    if (!rpc_ || !rpc_->isConnected()) return;
+
+    const double target = rail2_pos_spin_->value();
+    // Reuse the panel's rpm control; 0 on the slider would mean "don't move",
+    // so fall back to the same gentle default the homing runs use.
+    const int rpm = rail2_spin_->value() > 0 ? rail2_spin_->value() : 300;
+
+    rail2_goto_btn_->setEnabled(false);
+    home_rail2_state_->setText(QString("走位中… → %1mm").arg(target, 0, 'f', 1));
+    home_rail2_state_->setStyleSheet("color:#e0a030; font-family: Consolas; font-weight:bold;");
+
+    QJsonObject params;
+    params[Protocol::Fields::RAIL]      = 1;
+    params[Protocol::Fields::POS_MM]    = target;
+    params[Protocol::Fields::SPEED_RPM] = rpm;
+    rpc_->call(Protocol::Methods::AIRPORT_MOVE_TO_MM, params,
+        [this, target](QJsonObject reply) {
+            if (!reply.value("ok").toBool(false)) {
+                // Distinguish the two refusals — "未归零" is fixed by one
+                // click, "超软限位" means the number itself is wrong.
+                const bool homed = reply.value("homed").toBool(false);
+                home_rail2_state_->setText(
+                    homed ? QString("拒绝: %1mm 超出软限位").arg(target, 0, 'f', 1)
+                          : QStringLiteral("拒绝: 未归零, 请先点「导轨2 归零」"));
+                home_rail2_state_->setStyleSheet(
+                    "color:#e05050; font-family: Consolas; font-weight:bold;");
+                rail2_goto_btn_->setEnabled(true);
+                return;
+            }
+            if (rail2_move_timer_) rail2_move_timer_->start();
+        });
+}
+
+// Runs only while an absolute move is in flight. Advances the label with
+// the live position and hands the button back the moment the rail leaves
+// MOVING — whether it arrived (IDLE) or hit something (STALLED).
+void AirportWidget::pollRail2Move()
+{
+    if (!rpc_ || !rpc_->isConnected()) {
+        rail2_move_timer_->stop();
+        rail2_goto_btn_->setEnabled(true);
+        return;
+    }
+    rpc_->call(Protocol::Methods::AIRPORT_GET_STATUS, QJsonObject{},
+        [this](QJsonObject reply) {
+            QJsonObject r1;
+            for (const QJsonValue &v : reply.value("rails").toArray()) {
+                const QJsonObject o = v.toObject();
+                if (o.value("index").toInt(-1) == 1) { r1 = o; break; }
+            }
+            const int state = r1.value("state").toInt(0);
+            const QJsonValue posv = r1.value(Protocol::Fields::POS_MM);
+            const QString pos = posv.isNull()
+                ? QString() : QString("=%1mm").arg(posv.toDouble(), 0, 'f', 1);
+
+            if (state == 1) {                       // still MOVING
+                home_rail2_state_->setText("走位中…" + pos);
+                return;
+            }
+            rail2_move_timer_->stop();
+            rail2_goto_btn_->setEnabled(true);
+            if (state == 2) {
+                home_rail2_state_->setText("堵转停" + pos);
+                home_rail2_state_->setStyleSheet(
+                    "color:#e05050; font-family: Consolas; font-weight:bold;");
+            } else {
+                home_rail2_state_->setText("已归零" + pos);
+                home_rail2_state_->setStyleSheet(
+                    "color:#3ac06a; font-family: Consolas; font-weight:bold;");
+            }
         });
 }
 

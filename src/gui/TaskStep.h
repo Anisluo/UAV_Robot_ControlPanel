@@ -47,20 +47,29 @@ struct TaskStep {
 //                    mode: "P" | "L"  }
 // GRIPPER          { angle_mm: 0..70, force_pct: 0..100 }
 // AIRPORT_RAIL     { action: "lock"|"release"|"rail2_fwd"|"rail2_back",
-//                    stop_mode: "stall"|"distance" (default "stall"),
+//                    stop_mode: "stall"|"distance"|"position" (default "stall"),
 //                    speed_rpm: int,
-//                    distance_mm: float (only used when stop_mode=distance),
+//                    distance_mm: float (only when stop_mode=distance),
+//                    position_mm: float (only when stop_mode=position),
 //                    max_ms: int }
+//                  Sign convention (matches the AirportWidget buttons):
+//                    (+) = lock / 正向;  (−) = release / 负向 = toward zero.
 //                  stall mode:
 //                    lock/release → airport.lock / .release (pair clamp).
 //                    rail2_fwd/back → airport.set_speed (rail=1, ±rpm).
 //                    Backend stall monitor cuts the motor on jam.
 //                  distance mode:
-//                    Calls airport.move_distance (open-loop position cmd)
-//                    one or two rails. Motor self-stops on its pulse
-//                    counter. Per-rail completion monitor flips state
-//                    IDLE on reach / STALLED on early collision.
-//                  max_ms = GUI-side safety upper bound for both modes.
+//                    airport.move_mm — RELATIVE, closed loop (velocity +
+//                    0x36 encoder feedback), stops at the exact distance.
+//                  position mode:
+//                    airport.move_to_mm — ABSOLUTE, position measured from
+//                    the zero that 归零 latched (release-end hard stop).
+//                    The gateway computes the delta itself and refuses the
+//                    call outright if the rail has never been homed (the
+//                    driver's multi-turn encoder count is not retentive
+//                    across power cycles, so an un-homed "100mm" is
+//                    meaningless). Same closed-loop move underneath.
+//                  max_ms = GUI-side safety upper bound for all modes.
 // FIX_POINT        { x_mm, y_mm, z_mm, rx_deg, ry_deg, rz_deg,
 //                    duration_ms: int }
 //                  Drive the TCP to the recorded cartesian pose and hold

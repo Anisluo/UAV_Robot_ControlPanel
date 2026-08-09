@@ -106,9 +106,10 @@ private:
 
     // AIRPORT_RAIL — rail lock/release/rail2 actions, two stop modes
     QComboBox      *ar_action_     = nullptr;   // lock/release/rail2_fwd/rail2_back
-    QComboBox      *ar_stop_mode_  = nullptr;   // stall / distance
+    QComboBox      *ar_stop_mode_  = nullptr;   // stall / distance / position
     QSpinBox       *ar_speed_      = nullptr;   // rpm
-    QDoubleSpinBox *ar_distance_   = nullptr;   // mm (distance mode only)
+    QDoubleSpinBox *ar_distance_   = nullptr;   // mm, relative (distance mode only)
+    QDoubleSpinBox *ar_position_   = nullptr;   // mm from homed zero (position mode only)
     QSpinBox       *ar_max_ms_     = nullptr;   // GUI upper bound
 
     // AIRPORT_GRIPPER

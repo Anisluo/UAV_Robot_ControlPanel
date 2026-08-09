@@ -7,6 +7,7 @@
 class RpcClient;
 class QSlider;
 class QSpinBox;
+class QDoubleSpinBox;
 class QPushButton;
 class QLabel;
 class QTimer;
@@ -27,7 +28,9 @@ private slots:
     void onStopAll();
     void onHomeRails();          // 归零 — 跑到释放端硬限位并latch零点
     void onHomeRail2();          // 导轨2 独立归零
+    void onRail2GoTo();          // 导轨2 走到绝对位置 (距零点 N mm)
     void pollHomeStatus();       // 归零期间轮询 airport.get_status
+    void pollRail2Move();        // 绝对位置运动期间轮询, 到位后恢复按钮
     void onGripper(bool open);   // relay-driven airport jaw (proc_gateway/airport.gripper)
 
 private:
@@ -49,6 +52,11 @@ private:
     QLabel      *home_rail2_state_{nullptr};
     QLabel      *home_state_{nullptr};
     QTimer      *home_timer_{nullptr};
+    // 导轨2 绝对位置 — 距归零零点 N mm。只有归零过才有意义, 网关会拒掉
+    // 未归零的调用 (驱动器多圈计数掉电不保持)。
+    QDoubleSpinBox *rail2_pos_spin_{nullptr};
+    QPushButton    *rail2_goto_btn_{nullptr};
+    QTimer         *rail2_move_timer_{nullptr};
     QPushButton *gripper_open_btn_{nullptr};   // relay → 开 (jaw open)
     QPushButton *gripper_close_btn_{nullptr};  // relay → 关 (jaw close)
 };

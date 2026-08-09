@@ -342,15 +342,20 @@ void StageConfigDialog::buildEditPanels()
         auto *f = new QFormLayout(w);
         f->setContentsMargins(8, 8, 8, 8);
 
+        // Sign convention, same as the AirportWidget buttons on the
+        // dashboard: 负方向 (−) is always the direction that runs toward the
+        // homed zero. "前进/后退" said nothing about which physical way that
+        // was and got read backwards more than once.
         ar_action_ = new QComboBox(w);
-        ar_action_->addItem(QStringLiteral("机场平台锁定 (导轨 1+3)"),  "lock");
-        ar_action_->addItem(QStringLiteral("机场平台释放 (导轨 1+3)"),  "release");
-        ar_action_->addItem(QStringLiteral("机场夹爪导轨 前进 (导轨 2)"), "rail2_fwd");
-        ar_action_->addItem(QStringLiteral("机场夹爪导轨 后退 (导轨 2)"), "rail2_back");
+        ar_action_->addItem(QStringLiteral("机场平台锁定 (+) (导轨 1+3)"),  "lock");
+        ar_action_->addItem(QStringLiteral("机场平台释放 (−) (导轨 1+3)"),  "release");
+        ar_action_->addItem(QStringLiteral("机场夹爪导轨 正向 (+) (导轨 2)"), "rail2_fwd");
+        ar_action_->addItem(QStringLiteral("机场夹爪导轨 负向 (−) (导轨 2)"), "rail2_back");
 
         ar_stop_mode_ = new QComboBox(w);
-        ar_stop_mode_->addItem(QStringLiteral("堵转停 (撞死自动停)"),  "stall");
-        ar_stop_mode_->addItem(QStringLiteral("固定距离 (走 N mm)"),    "distance");
+        ar_stop_mode_->addItem(QStringLiteral("堵转停 (撞死自动停)"),      "stall");
+        ar_stop_mode_->addItem(QStringLiteral("固定距离 (相对走 N mm)"),   "distance");
+        ar_stop_mode_->addItem(QStringLiteral("绝对位置 (走到距零点 N mm)"), "position");
 
         ar_speed_ = new QSpinBox(w);
         ar_speed_->setRange(50, 3000);
@@ -364,6 +369,16 @@ void StageConfigDialog::buildEditPanels()
         ar_distance_->setValue(50.0);
         ar_distance_->setSuffix("mm");
 
+        // Absolute target, measured from the zero that 归零 latched (the
+        // release-end hard stop). Never negative: zero IS the stop, so a
+        // negative target can only mean grinding into it.
+        ar_position_ = new QDoubleSpinBox(w);
+        ar_position_->setRange(0.0, 2000.0);
+        ar_position_->setDecimals(1);
+        ar_position_->setSingleStep(1.0);
+        ar_position_->setValue(100.0);
+        ar_position_->setSuffix("mm");
+
         ar_max_ms_ = new QSpinBox(w);
         ar_max_ms_->setRange(1000, 60000);
         ar_max_ms_->setValue(7000);
@@ -373,23 +388,28 @@ void StageConfigDialog::buildEditPanels()
         f->addRow(QStringLiteral("动作"), ar_action_);
         f->addRow(QStringLiteral("停止方式"), ar_stop_mode_);
         f->addRow(QStringLiteral("速度"), ar_speed_);
-        f->addRow(QStringLiteral("距离"), ar_distance_);
+        f->addRow(QStringLiteral("距离 (相对)"), ar_distance_);
+        f->addRow(QStringLiteral("目标位置 (绝对)"), ar_position_);
         f->addRow(QStringLiteral("最长等待"), ar_max_ms_);
         f->addRow(new QLabel(
-            QStringLiteral("<i>堵转停: 电机一直走, 检测到 status 0x04/0x08<br>"
-                           "或读 CAN 失败 8 次自动停。<br>"
-                           "固定距离: 走配置的 mm 数停, 用 pulse 计数;<br>"
-                           "中途撞死也会停。最长等待是安全兜底。</i>"),
+            QStringLiteral("<i>堵转停: 电机一直走, 驱动器判定堵转 (转速&lt;8RPM<br>"
+                           "且电流&gt;阈值且持续超时) 置 status 0x04/0x08,<br>"
+                           "网关读到就急停; 或读 CAN 失败 8 次自动停。<br>"
+                           "固定距离: 从当前位置相对走 N mm (闭环编码器计数)。<br>"
+                           "绝对位置: 走到距零点 N mm 处, 增量由网关算;<br>"
+                           "<b>必须先归零</b>, 未归零该步会被拒绝。<br>"
+                           "最长等待是安全兜底, 提前到位会立即推进。</i>"),
             w));
 
-        // Distance row is only meaningful in distance mode — hide it
-        // entirely when stop_mode = stall instead of greying out (cleaner
-        // visual: operator only sees the fields that actually apply).
+        // Only one of 距离/目标位置 applies at a time — hide the other
+        // entirely rather than greying it out (cleaner visual: operator only
+        // sees the fields that actually apply).
         // QFormLayout::setRowVisible(QWidget*, bool) needs Qt 6.4+; we're
         // on 6.11.
         auto refreshAirportRailFields = [this, f]() {
-            const bool dist = (ar_stop_mode_->currentData().toString() == "distance");
-            f->setRowVisible(ar_distance_, dist);
+            const QString mode = ar_stop_mode_->currentData().toString();
+            f->setRowVisible(ar_distance_, mode == "distance");
+            f->setRowVisible(ar_position_, mode == "position");
         };
 
         connect(ar_action_, QOverload<int>::of(&QComboBox::currentIndexChanged),
@@ -397,11 +417,22 @@ void StageConfigDialog::buildEditPanels()
         connect(ar_stop_mode_, QOverload<int>::of(&QComboBox::currentIndexChanged),
                 this, [this, refreshAirportRailFields]() {
             refreshAirportRailFields();
+            // A full-travel absolute move can take tens of seconds (150mm at
+            // 1500rpm ≈ 38s on rail 2); the 7000ms stall default would fire
+            // the safety bound mid-move. Nudge it up, but only from the stall
+            // default — never stomp a value the operator chose themselves.
+            if (ar_stop_mode_->currentData().toString() == "position" &&
+                ar_max_ms_->value() <= 7000) {
+                const QSignalBlocker b(ar_max_ms_);
+                ar_max_ms_->setValue(45000);
+            }
             onParamChanged();
         });
         connect(ar_speed_, QOverload<int>::of(&QSpinBox::valueChanged),
                 this, &StageConfigDialog::onParamChanged);
         connect(ar_distance_, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
+                this, &StageConfigDialog::onParamChanged);
+        connect(ar_position_, QOverload<double>::of(&QDoubleSpinBox::valueChanged),
                 this, &StageConfigDialog::onParamChanged);
         connect(ar_max_ms_, QOverload<int>::of(&QSpinBox::valueChanged),
                 this, &StageConfigDialog::onParamChanged);
@@ -967,6 +998,7 @@ void StageConfigDialog::showRow(int row)
             const QSignalBlocker b_mode    (ar_stop_mode_);
             const QSignalBlocker b_speed   (ar_speed_);
             const QSignalBlocker b_dist    (ar_distance_);
+            const QSignalBlocker b_pos     (ar_position_);
             const QSignalBlocker b_max_ms  (ar_max_ms_);
 
             const QString action = s.params.value("action", "lock").toString();
@@ -981,12 +1013,14 @@ void StageConfigDialog::showRow(int row)
 
             ar_speed_->setValue(s.params.value("speed_rpm", 1500).toInt());
             ar_distance_->setValue(s.params.value("distance_mm", 50.0).toDouble());
+            ar_position_->setValue(s.params.value("position_mm", 100.0).toDouble());
             ar_max_ms_->setValue(s.params.value("max_ms", 7000).toInt());
 
             // Re-apply row visibility (the lambda hooked to ar_stop_mode_'s
             // currentIndexChanged is blocked by the QSignalBlocker above).
             if (auto *form = qobject_cast<QFormLayout*>(ar_distance_->parentWidget()->layout())) {
                 form->setRowVisible(ar_distance_, stop_mode == "distance");
+                form->setRowVisible(ar_position_, stop_mode == "position");
             }
             break;
         }
@@ -1067,6 +1101,7 @@ void StageConfigDialog::readEditorsTo(TaskStep &s)
             s.params["stop_mode"]   = ar_stop_mode_->currentData().toString();
             s.params["speed_rpm"]   = ar_speed_->value();
             s.params["distance_mm"] = ar_distance_->value();
+            s.params["position_mm"] = ar_position_->value();
             s.params["max_ms"]      = ar_max_ms_->value();
             break;
         case StepType::AIRPORT_GRIPPER:
@@ -1174,6 +1209,7 @@ void StageConfigDialog::onExecuteCurrentStep()
             const QString stop_mode = s.params.value("stop_mode", "stall").toString();
             const int rpm = s.params.value("speed_rpm", 1500).toInt();
             const double dist = s.params.value("distance_mm", 50.0).toDouble();
+            const double pos  = s.params.value("position_mm", 100.0).toDouble();
             QString stop_method = "airport.stop_all";
             QJsonObject stop_p;
             int direction = +1;
@@ -1186,9 +1222,42 @@ void StageConfigDialog::onExecuteCurrentStep()
             else { direction = +1; watched_rails = {0,2}; }
             rpc_->call(stop_method, stop_p, nullCb);
             QTimer::singleShot(300, this,
-                [this, action, stop_mode, rpm, dist, direction, watched_rails]() {
+                [this, action, stop_mode, rpm, dist, pos, direction, watched_rails]() {
                     if (!rpc_) return;
-                    if (stop_mode == "distance") {
+                    if (stop_mode == "position") {
+                        // ABSOLUTE — go to pos_mm from the homed zero. Must be
+                        // listed explicitly: this chain used to end in a plain
+                        // `else` that meant "stall", so a position step fell
+                        // through to airport.set_speed and ran the rail all the
+                        // way into its hard stop. Anything unrecognised now
+                        // still lands on stall, but position no longer does.
+                        for (const QJsonValue &rv : watched_rails) {
+                            const int rail_idx = rv.toInt();
+                            QJsonObject p;
+                            p["rail"]      = rail_idx;
+                            p["pos_mm"]    = pos;
+                            p["speed_rpm"] = std::abs(rpm);
+                            rpc_->call("airport.move_to_mm", p,
+                                [this, rail_idx, pos](QJsonObject reply) {
+                                    if (reply.value("ok").toBool(true)) return;
+                                    // Refusals are silent at the RPC layer, and
+                                    // a step that quietly does nothing is worse
+                                    // than one that errors — say why.
+                                    const bool homed = reply.value("homed").toBool(true);
+                                    QMessageBox::warning(this,
+                                        QStringLiteral("绝对位置被拒绝"),
+                                        homed
+                                          ? QStringLiteral("导轨%1 走到 %2mm 被拒绝: 超出软限位, "
+                                                           "或读取当前位置失败。")
+                                                .arg(rail_idx + 1).arg(pos, 0, 'f', 1)
+                                          : QStringLiteral("导轨%1 尚未归零, 无法走绝对位置。\n\n"
+                                                           "请先在主界面机场面板点「导轨2 归零」。\n"
+                                                           "驱动器多圈计数掉电不保持, 未归零时 "
+                                                           "%2mm 只是个任意偏移量。")
+                                                .arg(rail_idx + 1).arg(pos, 0, 'f', 1));
+                                });
+                        }
+                    } else if (stop_mode == "distance") {
                         // CLOSED-LOOP precise move — identical to Tab4
                         // dispatchScriptStep. Gateway airport.move_mm
                         // (velocity + 0x36 encoder feedback) stops at the

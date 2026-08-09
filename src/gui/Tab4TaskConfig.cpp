@@ -729,14 +729,15 @@ void Tab4TaskConfig::pollAirportRailDone(const QVector<int> &watched_rails,
                 if (idx >= 0 && idx < 3) state[idx] = o.value("state").toInt(0);
             }
             // Wait condition depends on the step's stop_mode:
-            //   stall    → state == 2 (STALLED)
-            //   distance → state != 1 (anything except MOVING; IDLE means
-            //              reached target, STALLED means hit obstacle
-            //              early — both are valid completion).
+            //   stall               → state == 2 (STALLED)
+            //   distance / position → state != 1 (anything except MOVING;
+            //              IDLE means reached target, STALLED means hit an
+            //              obstacle early — both are valid completion).
+            const bool moved_to_target = (mode == "distance" || mode == "position");
             bool all_done = !watched_rails.isEmpty();
             for (int r : watched_rails) {
                 if (r < 0 || r >= 3) { all_done = false; break; }
-                if (mode == "distance") {
+                if (moved_to_target) {
                     if (state[r] == 1) { all_done = false; break; }
                 } else {
                     if (state[r] != 2) { all_done = false; break; }
@@ -1677,6 +1678,7 @@ void Tab4TaskConfig::onFlowStepAdvance()
         const int travel_ms = int(max_delta * 1000.0f / deg_per_s);
         const int dyn_step_ms = std::max(1500, travel_ms + 500);
         step_advance_timer_->setInterval(dyn_step_ms);
+        step_advance_timer_->start();   // same reason as dispatchScriptStep's tail
         if (max_delta > 0.0f) {
             appendLog("info", QString("  travel %1°, speed_ratio=%2 → step %3 ms")
                                   .arg(max_delta, 0, 'f', 1)
@@ -1852,6 +1854,7 @@ void Tab4TaskConfig::dispatchScriptStep(const TaskStep &step)
             const QString stop_mode = step.params.value("stop_mode", "stall").toString();
             const int speed_rpm     = step.params.value("speed_rpm", 1500).toInt();
             const double distance   = step.params.value("distance_mm", 50.0).toDouble();
+            const double position   = step.params.value("position_mm", 100.0).toDouble();
             const int max_ms        = std::max(500, step.params.value("max_ms", 7000).toInt());
             constexpr int kStallSettleMs = 300;
 
@@ -1862,17 +1865,17 @@ void Tab4TaskConfig::dispatchScriptStep(const TaskStep &step)
             int direction = +1;           // +1 forward / -1 backward (for distance mode)
 
             if (action == "release") {
-                name = "释放(1+3)";
+                name = "释放(−)(1+3)";
                 watched_rails = {0, 2};
                 direction = -1;           // pair release moves opposite of lock
             } else if (action == "rail2_fwd" || action == "rail2_back") {
                 stop_method = Protocol::Methods::AIRPORT_STOP;
                 stop_params[Protocol::Fields::RAIL] = 1;
-                name = (action == "rail2_fwd") ? "导轨2 前进" : "导轨2 后退";
+                name = (action == "rail2_fwd") ? "导轨2 正向(+)" : "导轨2 负向(−)";
                 watched_rails = {1};
                 direction = (action == "rail2_fwd") ? +1 : -1;
             } else {
-                name = "锁定(1+3)";
+                name = "锁定(+)(1+3)";
                 watched_rails = {0, 2};
                 direction = +1;
             }
@@ -1890,11 +1893,54 @@ void Tab4TaskConfig::dispatchScriptStep(const TaskStep &step)
                 : 0;
 
             const QVector<int> rails_copy = watched_rails;
+            // See the +1 note further down — this is the run_idx that will be
+            // current once dispatchScriptStep returns and the caller bumps it.
+            const int session_run_idx = flow_step_run_idx_ + 1;
             QTimer::singleShot(kStallSettleMs, this,
-                [this, action, stop_mode, speed_rpm, direction, distance,
-                 rails_copy, cb_log_err]() {
+                [this, action, stop_mode, speed_rpm, direction, distance, position,
+                 rails_copy, cb_log_err, step_num, name, session_run_idx]() {
                     if (!rpc_) return;
-                    if (stop_mode == "distance") {
+                    if (stop_mode == "position") {
+                        // ABSOLUTE target, measured from the homed zero. The
+                        // gateway reads the encoder and derives the delta, so
+                        // there is no read→compute→command race here and the
+                        // action's +/- direction is irrelevant: the target
+                        // itself says which way to go. Refused outright when
+                        // the rail was never homed — surface that loudly
+                        // rather than let the step silently do nothing.
+                        for (int rail_idx : rails_copy) {
+                            QJsonObject p;
+                            p[Protocol::Fields::RAIL]      = rail_idx;
+                            p[Protocol::Fields::POS_MM]    = position;
+                            p[Protocol::Fields::SPEED_RPM] = std::abs(speed_rpm);
+                            rpc_->call(Protocol::Methods::AIRPORT_MOVE_TO_MM, p,
+                                [this, step_num, rail_idx, position, rails_copy,
+                                 stop_mode, name, session_run_idx](QJsonObject reply) {
+                                    if (!reply.value("ok").toBool(true)) {
+                                        const bool homed = reply.value("homed").toBool(true);
+                                        appendLog("warn",
+                                            QString("⚠ 第 %1 步 导轨%2 走到 %3mm 被拒绝: %4")
+                                                .arg(step_num).arg(rail_idx + 1)
+                                                .arg(position, 0, 'f', 1)
+                                                .arg(homed ? QStringLiteral("超出软限位或读位置失败")
+                                                           : QStringLiteral("该导轨未归零, 请先点归零")));
+                                        return;
+                                    }
+                                    // Start the completion poll only AFTER the
+                                    // gateway has acknowledged — by now the rail
+                                    // state is authoritative (MOVING, or IDLE if
+                                    // it was already within tolerance). Polling
+                                    // on a fixed timer instead would race the
+                                    // command and read a stale IDLE, which
+                                    // advances the flow while the rail is still
+                                    // sitting still.
+                                    if (rail_idx != rails_copy.front()) return;
+                                    if (flow_step_run_idx_ != session_run_idx) return;
+                                    pollAirportRailDone(rails_copy, stop_mode, name,
+                                                        session_run_idx);
+                                });
+                        }
+                    } else if (stop_mode == "distance") {
                         // Distance mode = gateway CLOSED-LOOP precise move
                         // (airport.move_mm: velocity + 0x36 encoder feedback,
                         // stops at the exact target). Signed dist_mm carries
@@ -1930,23 +1976,64 @@ void Tab4TaskConfig::dispatchScriptStep(const TaskStep &step)
                 ? (kStallSettleMs + distance_time_ms + 500)   // pre-stop + move + 500ms grace
                 : (max_ms + kStallSettleMs);
 
+            // Position mode has no travel estimate — how long the move takes
+            // depends on where the rail happens to be right now. So max_ms is
+            // the only thing bounding it, and if max_ms expires first the flow
+            // advances while the rail is STILL RUNNING. That is a legitimate
+            // safety bound, but it must not be silent: the next step would
+            // start against a rail that never reached its target.
+            //
+            // Probe once just before the bound fires. If the rail is still
+            // MOVING, say so loudly — the fix is a bigger 最长等待 on that step.
+            if (stop_mode == "position") {
+                const QVector<int> probe_rails = watched_rails;
+                QTimer::singleShot(std::max(300, duration_ms - 200), this,
+                    [this, session_run_idx, probe_rails, position, step_num]() {
+                        if (flow_step_run_idx_ != session_run_idx) return;  // 已到位推进过了
+                        if (!rpc_ || !rpc_->isConnected()) return;
+                        rpc_->call(Protocol::Methods::AIRPORT_GET_STATUS, QJsonObject{},
+                            [this, session_run_idx, probe_rails, position, step_num](QJsonObject reply) {
+                                if (flow_step_run_idx_ != session_run_idx) return;
+                                for (const QJsonValue &v : reply.value("rails").toArray()) {
+                                    const QJsonObject o = v.toObject();
+                                    const int idx = o.value("index").toInt(-1);
+                                    if (!probe_rails.contains(idx)) continue;
+                                    if (o.value("state").toInt(0) != 1) continue;   // 1 = MOVING
+                                    const QJsonValue pv = o.value(Protocol::Fields::POS_MM);
+                                    appendLog("warn",
+                                        QString("⚠ 第 %1 步 超时推进: 导轨%2 仍在运动, 未到 %3mm"
+                                                "%4 — 请把该步的「最长等待」调大")
+                                            .arg(step_num).arg(idx + 1).arg(position, 0, 'f', 1)
+                                            .arg(pv.isNull() ? QString()
+                                                             : QString(" (当前 %1mm)")
+                                                                   .arg(pv.toDouble(), 0, 'f', 1)));
+                                }
+                            });
+                    });
+            }
+
             // Status poll — advance condition depends on stop_mode.
             // 注意 +1: 调用方 (onFlowStepAdvance script 分支) 在 dispatchScriptStep
             // 返回之后立刻 ++flow_step_run_idx_. 所以"我们仍在这一步上"的
             // 当前 run_idx 实际是 dispatch 时的值 + 1. 不加这个 +1, 下面
             // pollAirportRailDone 里的 (flow_step_run_idx_ != session_run_idx)
             // 守卫会立刻为真, poll 永远跑不起来.
-            // Status-poll early-advance is ONLY for stall mode (advance the
-            // instant the rail stalls). DISTANCE mode must NOT poll: the
-            // gateway's airport.move_mm stops at the exact target and we
-            // advance on the duration_ms timer. The device gateway has no real
-            // airport.get_status — it ACKs unknown methods with {"ok":true}
-            // and NO "rails", so for distance mode the poll reads state=IDLE,
-            // falsely "completes" immediately, stop()s the step-advance timer,
-            // and the whole flow STALLS after this step (the "导轨2 stage 之后
-            // 后面 stage 不执行" bug). So skip polling for distance.
-            if (stop_mode != "distance") {
-                const int session_run_idx = flow_step_run_idx_ + 1;
+            // Status-poll early-advance, per stop_mode:
+            //   stall    → poll here on a timer; advance when state == STALLED.
+            //   distance → NO poll. The gateway's airport.move_mm stops at the
+            //              exact target and we advance on duration_ms. An older
+            //              device gateway had no real airport.get_status — it
+            //              ACKed unknown methods with {"ok":true} and NO
+            //              "rails", so the poll read state=IDLE, falsely
+            //              "completed" immediately, stop()ed the step-advance
+            //              timer, and the whole flow STALLED after this step
+            //              (the "导轨2 stage 之后后面 stage 不执行" bug).
+            //   position → polls, but started from the move_to_mm REPLY (see
+            //              above), not from a timer. Travel length is unknown
+            //              at dispatch time (it depends on where the rail
+            //              currently is), so there is no duration to estimate —
+            //              max_ms is only the safety bound.
+            if (stop_mode == "stall") {
                 QTimer::singleShot(kStallSettleMs + 200, this,
                     [this, watched_rails, stop_mode, name, session_run_idx]() {
                         if (flow_step_run_idx_ != session_run_idx) return;
@@ -1954,9 +2041,12 @@ void Tab4TaskConfig::dispatchScriptStep(const TaskStep &step)
                     });
             }
 
-            const QString mode_label = (stop_mode == "distance")
-                ? QString("固定 %1mm (~%2ms)").arg(std::abs(distance), 0, 'f', 1).arg(distance_time_ms)
-                : QString("堵转停");
+            const QString mode_label =
+                (stop_mode == "position")
+                    ? QString("走到 %1mm (距零点)").arg(position, 0, 'f', 1)
+              : (stop_mode == "distance")
+                    ? QString("固定 %1mm (~%2ms)").arg(std::abs(distance), 0, 'f', 1).arg(distance_time_ms)
+                    : QString("堵转停");
             appendLog("info",
                 QString("▶ [%1/%2] AIRPORT_RAIL %3 @ %4rpm  %5  (%6ms 急停 + 最长 %7ms)%8")
                     .arg(step_num).arg(total).arg(name).arg(speed_rpm)
@@ -2032,7 +2122,22 @@ void Tab4TaskConfig::dispatchScriptStep(const TaskStep &step)
             break;
     }
 
-    if (step_advance_timer_) step_advance_timer_->setInterval(duration_ms);
+    // start(), not just setInterval(). Qt only restarts a timer from
+    // setInterval() when it is ALREADY ACTIVE — on a stopped timer it
+    // quietly stores the value and nothing ever fires.
+    //
+    // That mattered because the early-advance polls (pollAirportRailDone,
+    // pollDoorAxisDone) legitimately stop() the timer before calling
+    // onFlowStepAdvance. So the first step that finished early left the
+    // timer stopped, and the flow then survived only as long as every
+    // following step also had a poll of its own to advance it. The first
+    // step WITHOUT one — AIRPORT_GRIPPER, DWELL, MOVE_JOINTS — had no
+    // clock left to advance it and the whole run froze there, mid-stage,
+    // with no error: 锁定(堵转停) → 导轨2(堵转停) → 机场夹爪 张开 ← 卡死.
+    if (step_advance_timer_) {
+        step_advance_timer_->setInterval(duration_ms);
+        step_advance_timer_->start();
+    }
 }
 
 void Tab4TaskConfig::onFlowStepSkip()
