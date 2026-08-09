@@ -52,6 +52,9 @@ namespace Methods {
     // the encoder and works out the delta itself, so no read→compute→command
     // race in the GUI. Refused (ok:false) when the rail has never been homed.
     constexpr const char* AIRPORT_MOVE_TO_MM = "airport.move_to_mm";
+    // 加速度档位 {rail, accel}: 0 = 直接启动 (无斜坡), 1..255 越大加速越快.
+    // 下一次运动生效; 不持久化 — 定下来的值要写进 UAV_AIRPORT_RAIL{N}_SPEED_ACC.
+    constexpr const char* AIRPORT_SET_ACCEL  = "airport.set_accel";
     // 归零: run the clamp pair to the release-side hard stop and latch
     // the encoder zero there. Needed after the rail drivers are
     // power-cycled — their multi-turn count restarts from 0 and the
@@ -129,6 +132,7 @@ namespace Fields {
     constexpr const char* POS_MM = "pos_mm";
     constexpr const char* DELTA_MM = "delta_mm";
     constexpr const char* DIST_MM = "dist_mm";        // signed relative distance for airport.move_mm
+    constexpr const char* ACCEL   = "accel";          // ZDT 0xF6 加速度档位 0..255
     constexpr const char* SPEED_RPM = "speed_rpm";
     constexpr const char* OPEN   = "open";
 

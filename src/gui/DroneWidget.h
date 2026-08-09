@@ -5,6 +5,8 @@
 #include <QByteArray>
 #include <QHash>
 #include <QAbstractSocket>
+#include <QJsonObject>
+#include <functional>
 
 #include "MeshMapWidget.h"
 
@@ -58,10 +60,28 @@ private slots:
     void onRemoteClientDisconnected();
     void onKmzDirBrowse();
 
+private slots:
+    // 一键起飞 / KMZ 航线 (PSDK psdkd JSON-RPC over UDP :5555)
+    void onTakeoff();
+    void onTakeoffPoll();
+    void onKmzUploadSpec();      // drone.kmz_begin → kmz_chunk → kmz_end
+    void onMissionCommand();     // start / stop / pause / resume
+    void onRpcTimeoutTick();
+
 private:
+    // ok=false carries `error` (psdkd returns a plain string, not a
+    // JSON-RPC error object) or a local timeout message.
+    using RpcCallback = std::function<void(bool ok, const QJsonObject &result,
+                                           const QString &error)>;
+
     struct PendingRequest {
-        int     octet{0};
-        QString method;
+        int         octet{0};
+        QString     method;
+        QJsonObject params;          // kept so a retry resends byte-identically
+        RpcCallback cb;              // null for the legacy telemetry path
+        int         retries_left{0};
+        int         timeout_ms{5000};
+        qint64      sent_ms{0};
     };
 
     void buildUi();
@@ -71,6 +91,20 @@ private:
     void updateNodeTimestamp(int octet, const QString &text);
     QString nodeIp(int octet) const;
     void sendRpcRequest(int octet, const QString &method);
+
+    // Spec §Reliability: 5s timeout, 3 retries, match on `id`, discard
+    // unmatched datagrams. Retries reuse the SAME id — psdkd documents
+    // idempotent handling for critical methods, and reusing the id is what
+    // lets a duplicated reply still be matched instead of orphaned.
+    void callRpc(int octet, const QString &method, const QJsonObject &params,
+                 RpcCallback cb, int timeout_ms = 5000, int retries = 3);
+    void transmit(int request_id, const PendingRequest &req);
+    int  kmzTargetOctet() const;
+
+    // KMZ upload state machine (spec §KMZ Waypoint Mission Upload)
+    void kmzSendNextChunk();
+    void kmzFinish(bool ok, const QString &message);
+    void setKmzStatus(const QString &text, const QString &color);
 
     // Remote-control helpers
     void handleRemoteCommand(QTcpSocket *client, const QJsonObject &req);
@@ -126,6 +160,34 @@ private:
     QTcpSocket  *pending_remote_client_ = nullptr;
     int          pending_remote_req_id_ = 0;
     QString      pending_remote_name_;     // for echoing back
+
+    // ── 一键起飞 ────────────────────────────────────────────────────────
+    QPushButton *btn_takeoff_        = nullptr;
+    QLabel      *takeoff_status_     = nullptr;
+    QTimer      *takeoff_poll_timer_ = nullptr;
+    int          takeoff_polls_left_ = 0;
+    int          takeoff_octet_      = 0;
+
+    // ── KMZ 航线下发 (协议规范版, UDP) ─────────────────────────────────
+    QPushButton  *btn_kmz_upload_spec_ = nullptr;
+    QPushButton  *btn_mission_start_   = nullptr;
+    QPushButton  *btn_mission_stop_    = nullptr;
+    QPushButton  *btn_mission_pause_   = nullptr;
+    QPushButton  *btn_mission_resume_  = nullptr;
+    class QProgressBar *kmz_progress_  = nullptr;
+
+    QByteArray   kmz_spec_bytes_;      // whole file, held for the chunk loop
+    QString      kmz_spec_filename_;
+    int          kmz_spec_octet_    = 0;
+    int          kmz_chunk_raw_max_ = 2048;  // server-declared in kmz_begin
+    int          kmz_next_seq_      = 0;
+    int          kmz_sent_bytes_    = 0;
+    bool         kmz_spec_busy_     = false;
+
+    QTimer      *rpc_timeout_timer_ = nullptr;
+    // Timeout bookkeeping needs a monotonic clock; QDateTime is wall-clock
+    // and this board's clock has jumped hours in a single session.
+    class QElapsedTimer *rpc_clock_ = nullptr;
 };
 
 #endif // DRONEWIDGET_H

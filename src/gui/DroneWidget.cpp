@@ -30,6 +30,9 @@
 #include <QTimer>
 #include <QUdpSocket>
 #include <QVBoxLayout>
+#include <QMessageBox>
+#include <QProgressBar>
+#include <QElapsedTimer>
 
 namespace {
 
@@ -48,7 +51,11 @@ DroneWidget::DroneWidget(QWidget *parent)
     , refresh_timer_(new QTimer(this))
     , udp_socket_(new QUdpSocket(this))
     , kmz_socket_(new QTcpSocket(this))
+    , takeoff_poll_timer_(new QTimer(this))
+    , rpc_timeout_timer_(new QTimer(this))
+    , rpc_clock_(new QElapsedTimer)
 {
+    rpc_clock_->start();
     buildUi();
 
     connect(refresh_timer_, &QTimer::timeout,
@@ -66,6 +73,11 @@ DroneWidget::DroneWidget(QWidget *parent)
             this, &DroneWidget::onKmzDisconnected);
     connect(kmz_socket_, &QAbstractSocket::errorOccurred,
             this, &DroneWidget::onKmzError);
+
+    takeoff_poll_timer_->setInterval(1000);       // spec: poll flight_status 1-5 Hz
+    connect(takeoff_poll_timer_, &QTimer::timeout, this, &DroneWidget::onTakeoffPoll);
+    rpc_timeout_timer_->setInterval(250);         // resolution for the 5s budget
+    connect(rpc_timeout_timer_, &QTimer::timeout, this, &DroneWidget::onRpcTimeoutTick);
 
     refresh_timer_->start(5000);
     refreshDroneStates();
@@ -163,6 +175,17 @@ void DroneWidget::buildUi()
         kmz_ip_combo_->addItem(QStringLiteral("192.168.200.%1").arg(octet));
     }
     kmz_ip_combo_->setFixedWidth(130);
+    // This combo is the single target for EVERY drone command — KMZ upload,
+    // mission control, and 起飞/降落/返航 alike. Default to .103 (the M3E
+    // board) rather than the first list entry: silently defaulting to .102
+    // would aim a takeoff at whichever node happened to sort first.
+    {
+        const int idx103 = kmz_ip_combo_->findText(QStringLiteral("192.168.200.103"));
+        if (idx103 >= 0) kmz_ip_combo_->setCurrentIndex(idx103);
+    }
+    kmz_ip_combo_->setToolTip(
+        QStringLiteral("所有无人机指令 (起飞/降落/返航/KMZ/航线) 的目标节点。\n"
+                       "PSDK 协议端口固定 UDP 5555。"));
 
     auto *kmzPortLabel = new QLabel("端口:", this);
     kmzPortLabel->setStyleSheet("color: #00c8d7; font-family: Consolas;");
@@ -186,12 +209,98 @@ void DroneWidget::buildUi()
     kmzTargetRow->addWidget(btn_kmz_send_);
     layout->addLayout(kmzTargetRow);
 
+    kmz_progress_ = new QProgressBar(this);
+    kmz_progress_->setTextVisible(false);
+    kmz_progress_->setFixedHeight(6);
+    kmz_progress_->setVisible(false);
+    layout->addWidget(kmz_progress_);
+
     kmz_status_label_ = new QLabel("就绪", this);
     kmz_status_label_->setStyleSheet("font-family: Consolas; color: #888aaa;");
     layout->addWidget(kmz_status_label_);
 
+    // 航线执行 — the aircraft holds the uploaded route until told to fly it.
+    auto *missionRow = new QHBoxLayout;
+    auto *missionLabel = new QLabel("航线执行:", this);
+    missionLabel->setStyleSheet("color: #00c8d7; font-family: Consolas;");
+    missionLabel->setFixedWidth(64);
+    missionRow->addWidget(missionLabel);
+    struct { const char *text; const char *method; } kMission[] = {
+        {"开始", "drone.start_mission"},
+        {"暂停", "drone.pause_mission"},
+        {"继续", "drone.resume_mission"},
+        {"停止", "drone.stop_mission"},
+    };
+    QPushButton **slots_[] = {&btn_mission_start_, &btn_mission_pause_,
+                              &btn_mission_resume_, &btn_mission_stop_};
+    for (int i = 0; i < 4; ++i) {
+        auto *b = new QPushButton(QString::fromUtf8(kMission[i].text), this);
+        b->setFixedHeight(26);
+        b->setProperty("psdk_method", QString::fromLatin1(kMission[i].method));
+        connect(b, &QPushButton::clicked, this, &DroneWidget::onMissionCommand);
+        missionRow->addWidget(b);
+        *slots_[i] = b;
+    }
+    missionRow->addStretch();
+    layout->addLayout(missionRow);
+
     connect(btn_kmz_load_, &QPushButton::clicked, this, &DroneWidget::onKmzLoadFile);
-    connect(btn_kmz_send_, &QPushButton::clicked, this, &DroneWidget::onKmzSend);
+    // 下发 now speaks the documented protocol: drone.kmz_begin / kmz_chunk /
+    // kmz_end over the same UDP :5555 socket as every other command. The old
+    // raw-TCP push (onKmzSend) is still reachable from the remote-control
+    // listener path, which has not been migrated.
+    btn_kmz_send_->setText("下 发");
+    btn_kmz_send_->setToolTip(
+        QStringLiteral("按 PSDK 协议分块下发: drone.kmz_begin → kmz_chunk(base64) → kmz_end\n"
+                       "目标端口固定为协议规定的 UDP 5555, 与上方端口框无关。"));
+    btn_kmz_upload_spec_ = btn_kmz_send_;
+    connect(btn_kmz_send_, &QPushButton::clicked, this, &DroneWidget::onKmzUploadSpec);
+
+    // ── 一键起飞 ──────────────────────────────────────────────────────────
+    auto *flyHr = new QFrame(this);
+    flyHr->setFrameShape(QFrame::HLine);
+    flyHr->setStyleSheet("color: #3a3f52;");
+    layout->addWidget(flyHr);
+
+    auto *flyRow = new QHBoxLayout;
+    btn_takeoff_ = new QPushButton("一键起飞", this);
+    btn_takeoff_->setFixedHeight(30);
+    btn_takeoff_->setStyleSheet(
+        "QPushButton { background:#2f8f4f; color:white; font-weight:bold;"
+        "              padding:4px 16px; border-radius:4px; }"
+        "QPushButton:hover { background:#37a75d; }"
+        "QPushButton:disabled { background:#3a3d52; color:#7c7f96; }");
+    auto *btn_land = new QPushButton("降 落", this);
+    auto *btn_home = new QPushButton("返 航", this);
+    for (QPushButton *b : {btn_land, btn_home}) b->setFixedHeight(30);
+    btn_land->setProperty("psdk_method", QStringLiteral("drone.land"));
+    btn_home->setProperty("psdk_method", QStringLiteral("drone.go_home"));
+    connect(btn_land, &QPushButton::clicked, this, &DroneWidget::onMissionCommand);
+    connect(btn_home, &QPushButton::clicked, this, &DroneWidget::onMissionCommand);
+    connect(btn_takeoff_, &QPushButton::clicked, this, &DroneWidget::onTakeoff);
+
+    flyRow->addWidget(btn_takeoff_);
+    flyRow->addWidget(btn_land);
+    flyRow->addWidget(btn_home);
+    flyRow->addStretch();
+    layout->addLayout(flyRow);
+
+    takeoff_status_ = new QLabel(this);
+    takeoff_status_->setStyleSheet("font-family: Consolas; color: #888aaa;");
+    layout->addWidget(takeoff_status_);
+
+    // Always show which node the buttons will actually command. Two of the
+    // three flight buttons are irreversible once they land on the wrong
+    // aircraft, so the target must never be something you have to go
+    // hunting for in another section of the panel.
+    auto showTarget = [this]() {
+        takeoff_status_->setText(
+            QString("就绪 — 目标 %1 : 5555，起飞前先查 gps_fix")
+                .arg(kmz_ip_combo_->currentText()));
+        takeoff_status_->setStyleSheet("font-family: Consolas; color: #888aaa;");
+    };
+    connect(kmz_ip_combo_, &QComboBox::currentTextChanged, this, showTarget);
+    showTarget();
 
     // ── 远端控制 (line-delimited JSON server) ──────────────────────────────
     auto *remoteHr = new QFrame(this);
@@ -488,17 +597,418 @@ void DroneWidget::setSimulationTelemetry(bool active, const QList<MeshNode> &nod
 
 void DroneWidget::sendRpcRequest(int octet, const QString &method)
 {
+    // Telemetry poll: fire-and-forget on purpose. It repeats every refresh
+    // tick anyway, so a retry would only pile duplicate datagrams onto a
+    // link that is already dropping them.
+    PendingRequest req;
+    req.octet = octet;
+    req.method = method;
+    req.retries_left = 0;
+    req.timeout_ms = 5000;
     const int requestId = next_request_id_++;
-    pending_requests_.insert(requestId, PendingRequest{octet, method});
+    pending_requests_.insert(requestId, req);
+    transmit(requestId, req);
+}
 
-    QJsonObject req;
-    req["jsonrpc"] = QStringLiteral("2.0");
-    req["id"] = requestId;
-    req["method"] = method;
-    req["params"] = QJsonObject{};
+// One datagram = one complete JSON message (spec §Transport). psdkd caps a
+// datagram at 4096 bytes; anything larger is a programming error here, not
+// something to discover on the wire, so it is refused loudly.
+void DroneWidget::transmit(int request_id, const PendingRequest &req)
+{
+    QJsonObject obj;
+    obj["jsonrpc"] = QStringLiteral("2.0");
+    obj["id"]      = request_id;
+    obj["method"]  = req.method;
+    if (!req.params.isEmpty()) {
+        obj["params"] = req.params;      // spec: params omissible when empty
+    }
 
-    const QByteArray payload = QJsonDocument(req).toJson(QJsonDocument::Compact);
-    udp_socket_->writeDatagram(payload, QHostAddress(nodeIp(octet)), kDroneRpcPort);
+    const QByteArray payload = QJsonDocument(obj).toJson(QJsonDocument::Compact);
+    if (payload.size() > 4096) {
+        qWarning("DroneWidget: %s datagram %d bytes exceeds the 4096 limit",
+                 qPrintable(req.method), payload.size());
+        return;
+    }
+    udp_socket_->writeDatagram(payload, QHostAddress(nodeIp(req.octet)), kDroneRpcPort);
+}
+
+void DroneWidget::callRpc(int octet, const QString &method, const QJsonObject &params,
+                          RpcCallback cb, int timeout_ms, int retries)
+{
+    PendingRequest req;
+    req.octet        = octet;
+    req.method       = method;
+    req.params       = params;
+    req.cb           = std::move(cb);
+    req.retries_left = retries;
+    req.timeout_ms   = timeout_ms;
+    req.sent_ms      = rpc_clock_->elapsed();
+
+    const int requestId = next_request_id_++;
+    pending_requests_.insert(requestId, req);
+    transmit(requestId, req);
+    if (rpc_timeout_timer_ && !rpc_timeout_timer_->isActive()) {
+        rpc_timeout_timer_->start();
+    }
+}
+
+// Retransmit or give up. UDP is connectionless, so a lost request and a dead
+// peer look identical from here — the only difference is how many attempts
+// we have spent.
+void DroneWidget::onRpcTimeoutTick()
+{
+    const qint64 now = rpc_clock_->elapsed();
+    QList<int> expired;
+    for (auto it = pending_requests_.begin(); it != pending_requests_.end(); ++it) {
+        if (!it.value().cb) continue;                       // telemetry: no timeout
+        if (now - it.value().sent_ms >= it.value().timeout_ms) expired.append(it.key());
+    }
+
+    for (int id : expired) {
+        PendingRequest req = pending_requests_.value(id);
+        if (req.retries_left > 0) {
+            req.retries_left--;
+            req.sent_ms = now;
+            pending_requests_[id] = req;
+            transmit(id, req);                              // same id — see callRpc
+            continue;
+        }
+        pending_requests_.remove(id);
+        if (req.cb) {
+            req.cb(false, QJsonObject{},
+                   QString("%1 无响应 (超时 %2ms, 已重试 3 次)")
+                       .arg(req.method).arg(req.timeout_ms));
+        }
+    }
+
+    bool any_tracked = false;
+    for (auto it = pending_requests_.begin(); it != pending_requests_.end(); ++it) {
+        if (it.value().cb) { any_tracked = true; break; }
+    }
+    if (!any_tracked && rpc_timeout_timer_) rpc_timeout_timer_->stop();
+}
+
+// ── KMZ 航线下发 (spec §KMZ Waypoint Mission Upload) ────────────────────
+//
+// drone.kmz_begin {file,size} → {ready,chunk_raw_max}
+//   loop  drone.kmz_chunk {seq,data:base64} → {ack,received}
+// drone.kmz_end {upload:1} → {file,size,uploaded}
+//
+// Strictly sequential: the next chunk is only sent after the current one is
+// acked. That is not just politeness — the server rejects out-of-order seq
+// with "bad seq (expected N)", and over UDP "sent" says nothing about
+// "arrived", so a windowed sender would reorder itself into that error.
+int DroneWidget::kmzTargetOctet() const
+{
+    const QString ip = kmz_ip_combo_ ? kmz_ip_combo_->currentText() : QString();
+    const int dot = ip.lastIndexOf('.');
+    return dot < 0 ? 0 : ip.mid(dot + 1).toInt();
+}
+
+void DroneWidget::setKmzStatus(const QString &text, const QString &color)
+{
+    if (!kmz_status_label_) return;
+    kmz_status_label_->setText(text);
+    kmz_status_label_->setStyleSheet(
+        QString("color:%1; font-family: Consolas;").arg(color));
+}
+
+void DroneWidget::onKmzUploadSpec()
+{
+    if (kmz_spec_busy_) {
+        setKmzStatus("上一次下发尚未结束", "#e0a030");
+        return;
+    }
+    const QString path = kmz_path_edit_ ? kmz_path_edit_->text().trimmed() : QString();
+    if (path.isEmpty()) {
+        setKmzStatus("未选择 KMZ 文件", "#e05050");
+        return;
+    }
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly)) {
+        setKmzStatus("无法打开文件: " + f.errorString(), "#e05050");
+        return;
+    }
+    const QByteArray bytes = f.readAll();
+    f.close();
+
+    if (bytes.isEmpty()) {
+        setKmzStatus("文件为空", "#e05050");
+        return;
+    }
+    if (bytes.size() > 64LL * 1024 * 1024) {          // spec: max 64 MB
+        setKmzStatus(QString("文件 %1 MB 超过协议上限 64MB")
+                         .arg(bytes.size() / 1048576.0, 0, 'f', 1), "#e05050");
+        return;
+    }
+
+    // Spec filename rules: UTF-8, ≤200 bytes, no '/', "..", quote,
+    // backslash or control characters. Validated before the first datagram
+    // so a bad name fails here instead of half-way through the transfer.
+    const QString name = QFileInfo(path).fileName();
+    const QByteArray name_utf8 = name.toUtf8();
+    QString bad;
+    if (name_utf8.size() > 200)                      bad = "文件名超过 200 字节";
+    else if (name.contains('/') || name.contains('\\')) bad = "文件名含路径分隔符";
+    else if (name.contains(QStringLiteral(".."))) bad = "文件名含 ..";
+    else if (name.contains('"') || name.contains('\'')) bad = "文件名含引号";
+    else {
+        for (QChar c : name) {
+            if (c.unicode() < 0x20 || c.unicode() == 0x7F) { bad = "文件名含控制字符"; break; }
+        }
+    }
+    if (!bad.isEmpty()) {
+        setKmzStatus("文件名不合规: " + bad, "#e05050");
+        return;
+    }
+
+    const int octet = kmzTargetOctet();
+    if (octet <= 0) {
+        setKmzStatus("未选择目标节点", "#e05050");
+        return;
+    }
+
+    kmz_spec_bytes_    = bytes;
+    kmz_spec_filename_ = name;
+    kmz_spec_octet_    = octet;
+    kmz_next_seq_      = 0;
+    kmz_sent_bytes_    = 0;
+    kmz_chunk_raw_max_ = 2048;
+    kmz_spec_busy_     = true;
+    if (btn_kmz_upload_spec_) btn_kmz_upload_spec_->setEnabled(false);
+    if (kmz_progress_) { kmz_progress_->setRange(0, bytes.size()); kmz_progress_->setValue(0);
+                         kmz_progress_->setVisible(true); }
+
+    setKmzStatus(QString("kmz_begin: %1 (%2 字节) → %3")
+                     .arg(name).arg(bytes.size()).arg(nodeIp(octet)), "#e0a030");
+
+    QJsonObject params;
+    params["file"] = name;
+    params["size"] = bytes.size();
+    callRpc(octet, QStringLiteral("drone.kmz_begin"), params,
+        [this](bool ok, const QJsonObject &res, const QString &err) {
+            if (!ok) { kmzFinish(false, "kmz_begin 失败: " + err); return; }
+            if (!res.value("ready").toBool(false)) {
+                kmzFinish(false, "kmz_begin 未就绪 (ready != true)");
+                return;
+            }
+            // Honour the server's advertised chunk size rather than assuming
+            // 2048 — the doc calls 2048 the current value, not a constant.
+            const int adv = res.value("chunk_raw_max").toInt(2048);
+            kmz_chunk_raw_max_ = qBound(256, adv, 2048);
+            setKmzStatus(QString("已就绪, 分块 %1 字节, 开始传输…")
+                             .arg(kmz_chunk_raw_max_), "#e0a030");
+            kmzSendNextChunk();
+        });
+}
+
+void DroneWidget::kmzSendNextChunk()
+{
+    if (kmz_sent_bytes_ >= kmz_spec_bytes_.size()) {
+        // All chunks acked → commit. upload:1 pushes on to the aircraft,
+        // which is slow, hence the spec's 15s timeout for this one call.
+        setKmzStatus("传输完成, kmz_end 推送到飞机中… (最长 15s)", "#e0a030");
+        QJsonObject params;
+        params["upload"] = 1;
+        callRpc(kmz_spec_octet_, QStringLiteral("drone.kmz_end"), params,
+            [this](bool ok, const QJsonObject &res, const QString &err) {
+                if (!ok) { kmzFinish(false, "kmz_end 失败: " + err); return; }
+                if (!res.value("uploaded").toBool(false)) {
+                    kmzFinish(false, "kmz_end 返回 uploaded != true");
+                    return;
+                }
+                kmzFinish(true, QString("✓ 航线已下发: %1 (%2 字节)")
+                                    .arg(res.value("file").toString(kmz_spec_filename_))
+                                    .arg(res.value("size").toInt(kmz_spec_bytes_.size())));
+            }, 15000, 3);
+        return;
+    }
+
+    const int len = qMin(kmz_chunk_raw_max_, kmz_spec_bytes_.size() - kmz_sent_bytes_);
+    const QByteArray raw = kmz_spec_bytes_.mid(kmz_sent_bytes_, len);
+    const int seq = kmz_next_seq_;
+
+    QJsonObject params;
+    params["seq"]  = seq;
+    params["data"] = QString::fromLatin1(raw.toBase64());
+
+    callRpc(kmz_spec_octet_, QStringLiteral("drone.kmz_chunk"), params,
+        [this, len, seq](bool ok, const QJsonObject &res, const QString &err) {
+            if (!ok) {
+                kmzFinish(false, QString("分块 %1 失败: %2").arg(seq).arg(err));
+                return;
+            }
+            // A mismatched ack means our seq and the server's disagree, and
+            // continuing would just walk further out of step. Abort with both
+            // numbers shown — the upload is idempotent, so a clean retry from
+            // seq 0 is safe and is the honest recovery.
+            const QJsonValue ackv = res.value("ack");
+            if (ackv.isDouble() && ackv.toInt() != seq) {
+                kmzFinish(false, QString("分块乱序: 发送 seq=%1, 服务端 ack=%2")
+                                     .arg(seq).arg(ackv.toInt()));
+                return;
+            }
+            kmz_sent_bytes_ += len;
+            kmz_next_seq_   = seq + 1;
+            if (kmz_progress_) kmz_progress_->setValue(kmz_sent_bytes_);
+            setKmzStatus(QString("传输中 %1 / %2 字节 (%3%)  seq=%4")
+                             .arg(kmz_sent_bytes_).arg(kmz_spec_bytes_.size())
+                             .arg(100.0 * kmz_sent_bytes_ / kmz_spec_bytes_.size(), 0, 'f', 1)
+                             .arg(kmz_next_seq_), "#e0a030");
+            kmzSendNextChunk();
+        });
+}
+
+void DroneWidget::kmzFinish(bool ok, const QString &message)
+{
+    kmz_spec_busy_ = false;
+    kmz_spec_bytes_.clear();
+    if (btn_kmz_upload_spec_) btn_kmz_upload_spec_->setEnabled(true);
+    if (kmz_progress_ && ok) kmz_progress_->setValue(kmz_progress_->maximum());
+    setKmzStatus(message, ok ? "#3ac06a" : "#e05050");
+}
+
+// start / stop / pause / resume — which one is decided by the sender button.
+void DroneWidget::onMissionCommand()
+{
+    auto *btn = qobject_cast<QPushButton *>(sender());
+    if (!btn) return;
+    const QString method = btn->property("psdk_method").toString();
+    if (method.isEmpty()) return;
+
+    const int octet = kmzTargetOctet();
+    if (octet <= 0) { setKmzStatus("未选择目标节点", "#e05050"); return; }
+
+    setKmzStatus(method + " 已发送…", "#e0a030");
+    callRpc(octet, method, QJsonObject{},
+        [this, method](bool ok, const QJsonObject &res, const QString &err) {
+            if (!ok) { setKmzStatus(method + " 失败: " + err, "#e05050"); return; }
+            const QString st = res.value("mission").toString();
+            setKmzStatus(QString("✓ %1 → %2").arg(method).arg(st.isEmpty() ? "ok" : st),
+                         "#3ac06a");
+        });
+}
+
+// ── 一键起飞 ────────────────────────────────────────────────────────────
+//
+// Spec §Takeoff workflow: check gps_fix ∈ [2,4] → send drone.takeoff →
+// poll flight_status (0→1→2) → watch motors_on.
+//
+// The GPS gate is checked here rather than left to the aircraft so the
+// operator sees WHY it was refused before anything spins. psdkd will also
+// refuse on its own; `force:1` overrides both, and is only ever sent after
+// an explicit confirmation.
+void DroneWidget::onTakeoff()
+{
+    const int octet = kmzTargetOctet();
+    if (octet <= 0) {
+        setStatus("未选择目标节点", "#e05050");
+        return;
+    }
+    takeoff_octet_ = octet;
+    btn_takeoff_->setEnabled(false);
+    takeoff_status_->setText(QString("查询 %1 GPS 状态…").arg(nodeIp(octet)));
+    takeoff_status_->setStyleSheet("color:#e0a030; font-family: Consolas;");
+
+    callRpc(octet, QStringLiteral("drone.get_telemetry"), QJsonObject{},
+        [this, octet](bool ok, const QJsonObject &tel, const QString &err) {
+            if (!ok) {
+                takeoff_status_->setText("起飞中止: " + err);
+                takeoff_status_->setStyleSheet("color:#e05050; font-family: Consolas;");
+                btn_takeoff_->setEnabled(true);
+                return;
+            }
+            const int fix  = tel.value("gps_fix").toInt(0);
+            const int sats = tel.value("gps_sats").toInt(0);
+            const int fs   = tel.value("flight_status").toInt(0);
+
+            if (fs != 0) {
+                takeoff_status_->setText(
+                    QString("已在空中 (flight_status=%1), 无需起飞").arg(fs));
+                takeoff_status_->setStyleSheet("color:#e0a030; font-family: Consolas;");
+                btn_takeoff_->setEnabled(true);
+                return;
+            }
+
+            // gps_fix: 0=none 1=DR 2=2D 3=3D 4=GPS+DR 5=timing-only.
+            // 5 is deliberately NOT accepted — it is a time-only solution
+            // with no usable position, despite being the largest value.
+            const bool gps_ok = (fix >= 2 && fix <= 4);
+            if (!gps_ok) {
+                const auto answer = QMessageBox::warning(this,
+                    QStringLiteral("GPS 未定位"),
+                    QString("当前 gps_fix=%1 (%2), 卫星 %3 颗 — 不满足起飞条件。\n\n"
+                            "强制起飞会绕过定位检查, 无人机可能漂移且无法返航。\n"
+                            "确定要发送 force:1 强制起飞吗?")
+                        .arg(fix)
+                        .arg(fix == 0 ? "无定位" : fix == 1 ? "仅航位推算"
+                                                            : fix == 5 ? "仅授时" : "未知")
+                        .arg(sats),
+                    QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
+                if (answer != QMessageBox::Yes) {
+                    takeoff_status_->setText("已取消 (GPS 未定位)");
+                    takeoff_status_->setStyleSheet("color:#888aaa; font-family: Consolas;");
+                    btn_takeoff_->setEnabled(true);
+                    return;
+                }
+            }
+
+            QJsonObject params;
+            if (!gps_ok) params["force"] = 1;
+
+            takeoff_status_->setText(gps_ok ? QString("起飞中… (gps_fix=%1, %2 星)")
+                                                  .arg(fix).arg(sats)
+                                            : QStringLiteral("强制起飞中… (force:1)"));
+            callRpc(octet, QStringLiteral("drone.takeoff"), params,
+                [this](bool ok2, const QJsonObject &res, const QString &err2) {
+                    if (!ok2) {
+                        takeoff_status_->setText("起飞失败: " + err2);
+                        takeoff_status_->setStyleSheet("color:#e05050; font-family: Consolas;");
+                        btn_takeoff_->setEnabled(true);
+                        return;
+                    }
+                    if (!res.value("takeoff").toBool(false)) {
+                        takeoff_status_->setText("起飞被拒 (takeoff != true)");
+                        takeoff_status_->setStyleSheet("color:#e05050; font-family: Consolas;");
+                        btn_takeoff_->setEnabled(true);
+                        return;
+                    }
+                    // Accepted — now confirm it actually leaves the ground.
+                    // A "true" here only means the command was taken.
+                    takeoff_polls_left_ = 30;          // 30 × 1s ≈ 30s
+                    takeoff_status_->setText("已接受, 等待离地…");
+                    takeoff_poll_timer_->start();
+                });
+        });
+}
+
+void DroneWidget::onTakeoffPoll()
+{
+    if (--takeoff_polls_left_ < 0) {
+        takeoff_poll_timer_->stop();
+        takeoff_status_->setText("起飞已发出, 但 30s 内未确认离地 — 请目视确认");
+        takeoff_status_->setStyleSheet("color:#e0a030; font-family: Consolas;");
+        btn_takeoff_->setEnabled(true);
+        return;
+    }
+    callRpc(takeoff_octet_, QStringLiteral("drone.get_telemetry"), QJsonObject{},
+        [this](bool ok, const QJsonObject &tel, const QString &) {
+            if (!ok) return;                       // transient — keep polling
+            const int fs = tel.value("flight_status").toInt(0);
+            const bool motors = tel.value("motors_on").toBool(false);
+            const double alt = tel.value("alt_rel_m").toDouble();
+
+            if (fs == 2) {                          // 2 = airborne
+                takeoff_poll_timer_->stop();
+                takeoff_status_->setText(QString("✓ 已起飞 — 相对高度 %1m").arg(alt, 0, 'f', 1));
+                takeoff_status_->setStyleSheet("color:#3ac06a; font-family: Consolas; font-weight:bold;");
+                btn_takeoff_->setEnabled(true);
+                return;
+            }
+            takeoff_status_->setText(
+                QString("起飞中… flight_status=%1%2 高度 %3m")
+                    .arg(fs).arg(motors ? " 电机已转" : " 电机未转").arg(alt, 0, 'f', 1));
+        }, 2000, 0);       // short timeout, no retry: the next tick re-asks
 }
 
 void DroneWidget::refreshDroneStates()
@@ -545,10 +1055,30 @@ void DroneWidget::onUdpReadyRead()
         const QJsonObject obj = doc.object();
         const int requestId = obj.value("id").toInt(-1);
         if (!pending_requests_.contains(requestId)) {
-            continue;
+            continue;               // spec: discard unmatched datagrams
         }
 
         const PendingRequest req = pending_requests_.take(requestId);
+
+        // Command replies (takeoff / KMZ / mission) go to their callback.
+        // Checked before the active-node filter: a command is issued against
+        // an explicitly chosen target, and dropping its reply because the
+        // node card happens to be inactive would hang the state machine.
+        if (req.cb) {
+            // psdkd reports failure as {"id":N,"error":"<string>"} — a plain
+            // string, not a JSON-RPC error object (spec §Request/Response).
+            const QJsonValue errv = obj.value("error");
+            if (!errv.isUndefined() && !errv.isNull()) {
+                req.cb(false, QJsonObject{},
+                       errv.isString() ? errv.toString()
+                                       : QString::fromUtf8(QJsonDocument::fromVariant(
+                                             errv.toVariant()).toJson(QJsonDocument::Compact)));
+            } else {
+                req.cb(true, obj.value("result").toObject(), QString());
+            }
+            continue;
+        }
+
         if (!active_nodes_.value(req.octet, false)) {
             continue;
         }
