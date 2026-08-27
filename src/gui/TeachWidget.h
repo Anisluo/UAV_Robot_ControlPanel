@@ -52,6 +52,8 @@ public:
 
 private slots:
     void onRecordPoint();
+    void onAutoRecordToggled(bool on);
+    void onAutoRecordTick();
     void onDeleteSelected();
     void onClearAll();
     void onSaveToFile();
@@ -80,6 +82,13 @@ private:
         int            gripper_angle    = 60;   // ° (5=closed, 60=open)
         int            gripper_force_pct = 30;  // 0-100
         int            dwell_ms = 0;            // pause after motion arrives
+        // Milliseconds from the start of a continuous teach capture. -1 for
+        // hand-marked points. When two consecutive waypoints both carry a
+        // timestamp, replay uses their difference as the step duration so
+        // the trajectory plays back at the speed it was taught — the
+        // estimate-from-joint-delta path has a 1500 ms floor that would
+        // stretch a 20 Hz capture into something 30x slower than reality.
+        int            t_ms = -1;
     };
     QVector<Waypoint> waypoints_;
 
@@ -103,6 +112,31 @@ private:
     int     replay_effective_step_ms_ = 1500; // dynamically estimated from joint delta
     int     replay_speed_pct_ = 30;           // fetched from piper.get_status at replay start
     QVector<float> replay_prev_joints_;       // pose at the START of current step
+
+    // ── 连续轨迹录制 ────────────────────────────────────────────────────
+    // Watches the firmware's own teach_status and captures joints for as
+    // long as the operator is physically dragging the arm. The operator
+    // never presses a start/stop button — grabbing the arm IS the start.
+    //
+    // V1.8-2 teach_status (verified live, see proc_piper.py):
+    //   0 = idle   1 = dragging   2 = released (still gravity-compensated)
+    // Capture runs while == 1 only. The 1→2 edge is the natural end.
+    class QCheckBox *auto_record_chk_  = nullptr;
+    QSpinBox        *auto_rate_spin_   = nullptr;   // Hz
+    QSpinBox        *auto_mindeg_spin_ = nullptr;   // 0.1° units, dedup threshold
+    QLabel          *auto_state_label_ = nullptr;
+    QTimer          *auto_timer_       = nullptr;
+
+    void appendAutoSample(const QVector<float> &j);
+
+    bool    auto_capturing_    = false;   // currently inside a drag session
+    bool    auto_warned_no_angles_ = false;  // one-shot compat warning
+    bool    auto_poll_inflight_ = false;  // one outstanding get_status at a time
+    qint64  auto_capture_t0_   = 0;
+    int     auto_session_count_ = 0;      // points captured this drag
+    int     auto_skipped_still_ = 0;      // samples dropped as "not moving"
+    QVector<float> auto_last_joints_;
+    int     auto_last_teach_status_ = -1;
 };
 
 #endif // TEACHWIDGET_H

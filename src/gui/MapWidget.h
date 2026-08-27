@@ -34,6 +34,13 @@ public slots:
     void setDronePosition(int octet, double lat, double lng);
     // Drop every recorded track (清空轨迹).
     void clearTracks();
+    // Recentre on a named city. Also becomes the origin for simulated flights.
+    void setCity(int index);
+    // 仿真: fly three drones around the current city on a timer.
+    void setSimulation(bool on);
+
+private slots:
+    void onSimTick();
 
 protected:
     void paintEvent(QPaintEvent *) override;
@@ -74,6 +81,64 @@ private:
 
     QLabel    *coord_label_  = nullptr;
     QCheckBox *follow_check_ = nullptr;
+    QLabel    *title_label_  = nullptr;
+    class QComboBox *city_combo_ = nullptr;
+    QCheckBox *sim_check_    = nullptr;
+
+    // ── 仿真 ────────────────────────────────────────────────────────────
+    // Three drones flown on independent closed paths around the selected
+    // city. Positions are generated in WGS-84 and pushed through the SAME
+    // setDronePosition() the real telemetry uses, so the GCJ-02 conversion,
+    // track accumulation and rendering are all exercised for real rather
+    // than short-circuited into a special "demo" drawing path.
+    enum AssetKind { AssetDrone = 0, AssetDock = 1, AssetCar = 2 };
+
+    // Assets fly WAYPOINT ROUTES, not circles. A perfect circle is not a
+    // shape any real mission flies — surveys are lawnmower passes, patrols
+    // are straight legs with turns. Positions are interpolated along a
+    // polyline at constant ground speed, in metres relative to HOME.
+    struct SimDrone {
+        int     octet;
+        int     kind = AssetDrone;
+        QString name;
+        QVector<QPointF> route;    // metres, x=east y=north, closed loop
+        double  s = 0.0;           // arclength travelled along route, m
+        double  speed_mps = 12.0;
+        double  alt_m = 0.0;
+        int     battery_pct = 100;
+        QPointF form_offset;       // metres, in the leader's frame
+        double  last_lat = 0.0, last_lng = 0.0;
+        bool    has_last = false;
+    };
+    QVector<SimDrone> sim_drones_;
+
+    // Formation state. The three aircraft alternate between flying a shared
+    // leader route in a V and splitting to their own survey boxes.
+    QVector<QPointF> leader_route_;   // metres
+    double  leader_s_ = 0.0;
+    double  home_lat_ = 0.0, home_lng_ = 0.0;
+    double  sim_clock_s_ = 0.0;
+    bool    formation_ = true;
+    QLabel *phase_label_ = nullptr;
+
+    // Fixed ground infrastructure (大疆机场). Static, so it is kept separate
+    // from the moving assets and drawn straight from WGS-84 each frame.
+    struct SiteMarker { QString name; double lat, lng; };
+    QVector<SiteMarker> sites_;
+    QHash<int, int>     kind_of_;   // octet → AssetKind, for the renderer
+    class QTimer *sim_timer_ = nullptr;
+    bool   sim_on_ = false;
+    // Extra per-node facts the map shows in its red HUD labels. Real
+    // telemetry has no source for these yet, so they are only populated in
+    // simulation and the labels degrade to position-only without them.
+    QHash<int, double> info_alt_;
+    QHash<int, double> info_spd_;
+    QHash<int, int>    info_bat_;
+    QHash<int, double> info_hdg_;
+    // True WGS-84 fix per node, kept for the label — latest_ holds GCJ-02
+    // (needed for drawing) and printing that as "GPS" would be wrong by a
+    // few hundred metres.
+    QHash<int, QPointF> latest_wgs_;
 };
 
 #endif // MAPWIDGET_H

@@ -922,6 +922,32 @@ QVector<Tab4TaskConfig::SimSegment> Tab4TaskConfig::buildSimPlaylist() const
                                         .arg(TaskStep::typeLabel(step.type))
                                         .arg(step.summary());
                         break;
+                    case StepType::ARM_TRAJECTORY: {
+                        // Animate to the trajectory's FINAL pose over its
+                        // recorded duration. The viewer interpolates between
+                        // segment endpoints, so replaying every captured
+                        // sample here would need one segment per sample —
+                        // hundreds of them, for a preview. Landing on the end
+                        // pose in the right amount of time is what makes the
+                        // rest of the stage line up.
+                        const QVariantList tl   = step.params.value("t_ms").toList();
+                        const QVariantList flat = step.params.value("joints_flat").toList();
+                        if (!tl.isEmpty() && flat.size() == tl.size() * 6) {
+                            seg.target_joints.resize(6);
+                            const int last = tl.size() - 1;
+                            for (int i = 0; i < 6; ++i)
+                                seg.target_joints[i] = float(flat[last * 6 + i].toDouble());
+                            prev_joints = seg.target_joints;
+                            seg.duration_ms = std::max(200, tl.last().toInt());
+                            seg.label = QStringLiteral("[%1] 机械臂轨迹 %2 点 / %3s")
+                                            .arg(stage.title).arg(tl.size())
+                                            .arg(seg.duration_ms / 1000.0, 0, 'f', 1);
+                        } else {
+                            seg.duration_ms = 400;
+                            seg.label = QStringLiteral("[%1] 机械臂轨迹 (未录制)").arg(stage.title);
+                        }
+                        break;
+                    }
                 }
                 out.append(std::move(seg));
             }
@@ -2109,6 +2135,74 @@ void Tab4TaskConfig::dispatchScriptStep(const TaskStep &step)
             appendLog("info",
                 QString("▶ [%1/%2] %3 → 等限位 (最长 %4ms)%5")
                     .arg(step_num).arg(total).arg(name).arg(max_ms).arg(note));
+            break;
+        }
+        case StepType::ARM_TRAJECTORY: {
+            // Replay a whole drag-teach capture. Each sample is re-sent at
+            // its recorded t_ms, so the arm retraces the motion at the speed
+            // it was taught instead of jumping pose-to-pose.
+            const QVariantList tl   = step.params.value("t_ms").toList();
+            const QVariantList flat = step.params.value("joints_flat").toList();
+            if (tl.isEmpty() || flat.size() != tl.size() * 6) {
+                appendLog("warn",
+                    QString("⚠ [%1/%2] 机械臂轨迹为空或数据不完整, 跳过%3")
+                        .arg(step_num).arg(total).arg(note));
+                duration_ms = 100;
+                break;
+            }
+            const double sr = step.params.value("speed_ratio", 0.3).toDouble();
+            const int total_ms = tl.last().toInt();
+            // The step's own clock is the trajectory length; the advance
+            // timer only needs to outlast it.
+            duration_ms = total_ms + 600;
+
+            auto *timer = new QTimer(this);
+            auto *idx   = new int(0);
+            const qint64 t0 = QDateTime::currentMSecsSinceEpoch();
+            const int session_run_idx = flow_step_run_idx_ + 1;
+            timer->setInterval(10);
+            connect(timer, &QTimer::timeout, this,
+                [this, timer, idx, tl, flat, sr, t0, session_run_idx]() {
+                    // Abandon playback once this step is no longer current —
+                    // otherwise a cancelled run would keep driving the arm
+                    // from a dead step.
+                    //
+                    // Test ONLY the run index. flow_running_ looks like the
+                    // natural guard but it is false during single-step
+                    // execution (onFlowStepExecute never sets it), so
+                    // including it killed playback on the very first tick:
+                    // every other step type fires its RPC synchronously in
+                    // dispatchScriptStep and was unaffected, leaving the
+                    // trajectory as the only step that silently did nothing.
+                    // The index is maintained in both paths, and stopping or
+                    // finishing a run sets it to -1, so it covers cancellation
+                    // on its own.
+                    if (flow_step_run_idx_ != session_run_idx) {
+                        timer->stop(); timer->deleteLater(); delete idx;
+                        return;
+                    }
+                    const qint64 el = QDateTime::currentMSecsSinceEpoch() - t0;
+                    int sent = -1;
+                    while (*idx < tl.size() && tl[*idx].toInt() <= el) { sent = *idx; ++(*idx); }
+                    if (sent >= 0 && rpc_ && rpc_->isConnected()) {
+                        QJsonArray j;
+                        for (int k = 0; k < 6; ++k) j.append(flat[sent * 6 + k].toDouble());
+                        QJsonObject p;
+                        p[Protocol::Fields::JOINTS] = j;
+                        p["speed_ratio"] = sr;
+                        rpc_->call(Protocol::Methods::ARM_MOVE_JOINTS, p, [](QJsonObject){});
+                    }
+                    if (*idx >= tl.size()) {
+                        timer->stop(); timer->deleteLater(); delete idx;
+                    }
+                });
+            timer->start();
+
+            appendLog("info",
+                QString("▶ [%1/%2] 机械臂轨迹 %3 点 / %4s @速度%5%%6")
+                    .arg(step_num).arg(total).arg(tl.size())
+                    .arg(total_ms / 1000.0, 0, 'f', 1)
+                    .arg(int(sr * 100)).arg(note));
             break;
         }
         case StepType::MOVE_CARTESIAN:

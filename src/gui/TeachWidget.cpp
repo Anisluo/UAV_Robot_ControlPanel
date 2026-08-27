@@ -10,6 +10,8 @@
 #include <QListWidget>
 #include <QListWidgetItem>
 #include <QSpinBox>
+#include <QCheckBox>
+#include <cmath>
 #include <QPlainTextEdit>
 #include <QComboBox>
 #include <QFileDialog>
@@ -59,8 +61,18 @@ TeachWidget::TeachWidget(RpcClient *rpc, QWidget *parent)
     buildUi();
 
     replay_timer_ = new QTimer(this);
-    replay_timer_->setInterval(50);
+    // 20 ms, not 50. A continuously captured trajectory has steps as short
+    // as the capture interval (50 ms at the default 20 Hz), and a tick that
+    // coarse can only advance one waypoint per tick — the playback rate
+    // would be set by the timer instead of by the recorded timing, and any
+    // scheduling jitter would land whole waypoints late. Ticking faster
+    // than the shortest step keeps the recorded timestamps in charge.
+    replay_timer_->setInterval(20);
     connect(replay_timer_, &QTimer::timeout, this, &TeachWidget::onReplayTick);
+
+    auto_timer_ = new QTimer(this);
+    auto_timer_->setInterval(50);        // 20Hz default; reset on enable
+    connect(auto_timer_, &QTimer::timeout, this, &TeachWidget::onAutoRecordTick);
 }
 
 void TeachWidget::buildUi()
@@ -121,6 +133,54 @@ void TeachWidget::buildUi()
     row2->addWidget(step_ms_spin_);
     root->addLayout(row2);
 
+    // ── Row 2b: 连续轨迹录制 ──────────────────────────────────────────
+    auto *rowAuto = new QHBoxLayout;
+    rowAuto->setSpacing(4);
+    auto_record_chk_ = new QCheckBox(QStringLiteral("连续轨迹录制"), this);
+    auto_record_chk_->setToolTip(QStringLiteral(
+        "勾选后监测机械臂固件的 teach_status:\n"
+        "  用手拖动机械臂 → 自动开始采集\n"
+        "  松手            → 自动结束本段\n"
+        "无需按开始/停止, 抓住机械臂就是开始。\n"
+        "采集到的点带时间戳, 回放时按当时的速度还原。"));
+    auto_record_chk_->setStyleSheet("color:#ddd;");
+
+    auto *rateLbl = new QLabel(QStringLiteral("频率:"), this);
+    rateLbl->setStyleSheet("color:#aab6cc;");
+    auto_rate_spin_ = new QSpinBox(this);
+    auto_rate_spin_->setRange(5, 50);
+    auto_rate_spin_->setValue(20);
+    auto_rate_spin_->setSuffix(" Hz");
+    auto_rate_spin_->setFixedWidth(80);
+    auto_rate_spin_->setToolTip(QStringLiteral(
+        "proc_piper 的状态缓存约 20ms 刷新一次 (50Hz), 采样再快也只是\n"
+        "重复读到同一份快照。手动拖动的真实频率远低于 5Hz, 20Hz 已经\n"
+        "远超奈奎斯特, 且 30 秒示教约 600 点而不是 1500 点。"));
+
+    auto *mindegLbl = new QLabel(QStringLiteral("静止阈值:"), this);
+    mindegLbl->setStyleSheet("color:#aab6cc;");
+    auto_mindeg_spin_ = new QSpinBox(this);
+    auto_mindeg_spin_->setRange(0, 50);
+    auto_mindeg_spin_->setValue(3);            // 0.3°
+    auto_mindeg_spin_->setSuffix(QStringLiteral(" ×0.1°"));
+    auto_mindeg_spin_->setFixedWidth(90);
+    auto_mindeg_spin_->setToolTip(QStringLiteral(
+        "相邻采样中最大关节变化小于该值就丢弃, 避免示教开头/结尾\n"
+        "握住不动的那几秒变成几百个重复点 (回放时是纯粹的死时间)。\n"
+        "设为 0 = 全部保留。"));
+
+    rowAuto->addWidget(auto_record_chk_);
+    rowAuto->addStretch();
+    rowAuto->addWidget(rateLbl);
+    rowAuto->addWidget(auto_rate_spin_);
+    rowAuto->addWidget(mindegLbl);
+    rowAuto->addWidget(auto_mindeg_spin_);
+    root->addLayout(rowAuto);
+
+    auto_state_label_ = new QLabel(QStringLiteral("未启用"), this);
+    auto_state_label_->setStyleSheet("color:#888aaa; font-family: Consolas;");
+    root->addWidget(auto_state_label_);
+
     // ── Row 3: replay / stop ──────────────────────────────────────────
     auto *row3 = new QHBoxLayout;
     row3->setSpacing(4);
@@ -167,6 +227,11 @@ void TeachWidget::buildUi()
     root->addWidget(log_view_);
 
     connect(btn_record_, &QPushButton::clicked, this, &TeachWidget::onRecordPoint);
+    connect(auto_record_chk_, &QCheckBox::toggled, this, &TeachWidget::onAutoRecordToggled);
+    // Rate is applied live so the operator can tune it between drags
+    // without having to toggle the mode off and on.
+    connect(auto_rate_spin_, QOverload<int>::of(&QSpinBox::valueChanged), this,
+            [this](int hz) { if (auto_timer_) auto_timer_->setInterval(1000 / qBound(5, hz, 50)); });
     connect(btn_delete_, &QPushButton::clicked, this, &TeachWidget::onDeleteSelected);
     connect(btn_clear_,  &QPushButton::clicked, this, &TeachWidget::onClearAll);
     connect(btn_save_,   &QPushButton::clicked, this, &TeachWidget::onSaveToFile);
@@ -220,6 +285,169 @@ void TeachWidget::rebuildList()
 }
 
 // ── Record current arm pose as a new waypoint ──────────────────────
+// ── 连续轨迹录制 ────────────────────────────────────────────────────────
+//
+// Sampling rate: proc_piper refreshes its status cache every 2 heartbeats
+// (~20 ms), so 50 Hz is the ceiling — polling faster only re-reads the same
+// snapshot. 20 Hz is the default: hand-dragging carries well under 5 Hz of
+// real content, so 20 Hz is comfortably past Nyquist, and it keeps a 30 s
+// teach to ~600 points instead of ~1500.
+void TeachWidget::onAutoRecordToggled(bool on)
+{
+    if (!on) {
+        auto_timer_->stop();
+        if (auto_capturing_) {
+            // Toggled off mid-drag: keep what was captured rather than
+            // discarding the operator's work.
+            appendLog(QStringLiteral("⏹ 录制模式关闭 — 本次已保留 %1 点")
+                          .arg(auto_session_count_));
+        }
+        auto_capturing_ = false;
+        auto_last_teach_status_ = -1;
+        auto_state_label_->setText(QStringLiteral("未启用"));
+        auto_state_label_->setStyleSheet("color:#888aaa; font-family: Consolas;");
+        return;
+    }
+    if (!rpc_ || !rpc_->isConnected()) {
+        appendLog(QStringLiteral("⚠ RPC 未连接, 无法启用录制模式"));
+        auto_record_chk_->setChecked(false);
+        return;
+    }
+    auto_capturing_    = false;
+    auto_last_teach_status_ = -1;
+    auto_poll_inflight_ = false;
+    auto_timer_->setInterval(1000 / qBound(5, auto_rate_spin_->value(), 50));
+    auto_timer_->start();
+    auto_state_label_->setText(QStringLiteral("等待示教 — 用手拖动机械臂即开始"));
+    auto_state_label_->setStyleSheet("color:#e0a030; font-family: Consolas;");
+    appendLog(QStringLiteral("▶ 录制模式已启用 (%1Hz) — 监测 teach_status")
+                  .arg(auto_rate_spin_->value()));
+}
+
+void TeachWidget::onAutoRecordTick()
+{
+    if (!rpc_ || !rpc_->isConnected()) return;
+    // Never stack requests. If a reply is late, skipping this tick keeps the
+    // timeline honest; queueing would build a backlog that reports poses
+    // long after they happened.
+    if (auto_poll_inflight_) return;
+    auto_poll_inflight_ = true;
+
+    rpc_->call(Protocol::Methods::PIPER_GET_STATUS, QJsonObject{},
+        [this](QJsonObject reply) {
+            auto_poll_inflight_ = false;
+            if (!auto_record_chk_ || !auto_record_chk_->isChecked()) return;
+
+            const int ts = reply.value("teach_status").toInt(0);
+            const QJsonArray arr = reply.value(Protocol::Fields::ANGLES).toArray();
+
+            // ── 进入示教 ──
+            if (ts == 1 && !auto_capturing_) {
+                auto_capturing_     = true;
+                auto_capture_t0_    = QDateTime::currentMSecsSinceEpoch();
+                auto_session_count_ = 0;
+                auto_skipped_still_ = 0;
+                auto_last_joints_.clear();
+                auto_state_label_->setText(QStringLiteral("● 录制中…"));
+                auto_state_label_->setStyleSheet(
+                    "color:#e05050; font-family: Consolas; font-weight:bold;");
+                appendLog(QStringLiteral("● 检测到进入示教模式 — 开始采集"));
+            }
+
+            // ── 退出示教 ──
+            // Any value other than 1 ends the session: 2 is "released", 0 is
+            // a full reset via the 使能 handshake. Both mean the operator is
+            // no longer dragging.
+            if (ts != 1 && auto_capturing_) {
+                auto_capturing_ = false;
+                const qint64 dur = QDateTime::currentMSecsSinceEpoch() - auto_capture_t0_;
+                auto_state_label_->setText(
+                    QStringLiteral("等待示教 — 上次 %1 点 / %2s")
+                        .arg(auto_session_count_).arg(dur / 1000.0, 0, 'f', 1));
+                auto_state_label_->setStyleSheet("color:#3ac06a; font-family: Consolas;");
+                appendLog(QStringLiteral("■ 退出示教 (teach_status=%1) — 采集 %2 点, "
+                                         "耗时 %3s, 静止跳过 %4 帧")
+                              .arg(ts).arg(auto_session_count_)
+                              .arg(dur / 1000.0, 0, 'f', 1).arg(auto_skipped_still_));
+                rebuildList();
+            }
+            auto_last_teach_status_ = ts;
+            if (!auto_capturing_) return;
+
+            if (arr.size() != 6) {
+                // Older proc_piper builds don't put `angles` in get_status.
+                // Fall back to a second call rather than silently recording
+                // nothing — a recorder that captures zero points while
+                // showing "录制中" is the worst possible failure here.
+                // The two samples are then up to one tick apart; that is
+                // acceptable, and the fix is to deploy the newer proc_piper.
+                if (!auto_warned_no_angles_) {
+                    auto_warned_no_angles_ = true;
+                    appendLog(QStringLiteral(
+                        "⚠ piper.get_status 未返回 angles — 回退到单独调用 "
+                        "arm.get_angles (建议更新 proc_piper)"));
+                }
+                rpc_->call(Protocol::Methods::ARM_GET_ANGLES, QJsonObject{},
+                    [this](QJsonObject r2) {
+                        const QJsonArray a2 = r2.value(Protocol::Fields::ANGLES).toArray();
+                        if (a2.size() != 6 || !auto_capturing_) return;
+                        QVector<float> j2;
+                        for (const auto &v : a2) j2.append(float(v.toDouble()));
+                        appendAutoSample(j2);
+                    });
+                return;
+            }
+
+            QVector<float> j;
+            j.reserve(6);
+            for (const auto &v : arr) j.append(float(v.toDouble()));
+            appendAutoSample(j);
+        });
+}
+
+// Shared tail for both sampling paths: dedup against the previous sample,
+// then append with a timestamp.
+void TeachWidget::appendAutoSample(const QVector<float> &j)
+{
+    if (!auto_capturing_ || j.size() != 6) return;
+
+    // Drop samples where nothing moved. A teach session usually starts and
+    // ends with the operator holding still, and those stretches would
+    // otherwise become hundreds of identical waypoints that replay as dead
+    // time. The timestamp is still taken from the wall clock, so skipping
+    // does not compress the trajectory — the pause is preserved as a longer
+    // interval between the two points that bracket it.
+    if (!auto_last_joints_.isEmpty()) {
+        float max_delta = 0.0f;
+        for (int i = 0; i < 6 && i < auto_last_joints_.size(); ++i) {
+            max_delta = std::max(max_delta, std::abs(j[i] - auto_last_joints_[i]));
+        }
+        if (max_delta < auto_mindeg_spin_->value() / 10.0f) {
+            ++auto_skipped_still_;
+            return;
+        }
+    }
+
+    Waypoint w;
+    w.label  = QStringLiteral("t%1").arg(waypoints_.size() + 1);
+    w.joints = j;
+    w.gripper_state     = GripperUnchanged;
+    w.gripper_angle     = 60;
+    w.gripper_force_pct = 30;
+    w.dwell_ms = 0;
+    w.t_ms = int(QDateTime::currentMSecsSinceEpoch() - auto_capture_t0_);
+    waypoints_.append(w);
+    auto_last_joints_ = j;
+    ++auto_session_count_;
+
+    // The list widget is rebuilt when the session ends, not per sample — at
+    // 20 Hz a full rebuild per point would dominate the UI thread and add
+    // jitter to the very timestamps being recorded.
+    auto_state_label_->setText(
+        QStringLiteral("● 录制中… %1 点").arg(auto_session_count_));
+    count_label_->setText(QStringLiteral("共 %1 点").arg(waypoints_.size()));
+}
+
 void TeachWidget::onRecordPoint()
 {
     if (!rpc_ || !rpc_->isConnected()) {
@@ -301,6 +529,10 @@ void TeachWidget::onSaveToFile()
         jo["gripper_angle"]     = w.gripper_angle;
         jo["gripper_force_pct"] = w.gripper_force_pct;
         jo["dwell_ms"]          = w.dwell_ms;
+        // Only emitted for continuously captured points. Its presence is
+        // what tells replay to use the taught timing instead of the
+        // per-step estimate, so it must survive a save/load round-trip.
+        if (w.t_ms >= 0) jo["t_ms"] = w.t_ms;
         jarr.append(jo);
     }
     QJsonObject root;
@@ -353,6 +585,7 @@ void TeachWidget::onLoadFromFile()
         w.gripper_angle    = jo.value("gripper_angle").toInt(60);
         w.gripper_force_pct = jo.value("gripper_force_pct").toInt(30);
         w.dwell_ms          = jo.value("dwell_ms").toInt(0);
+        w.t_ms              = jo.value("t_ms").toInt(-1);   // absent → hand-marked
         waypoints_.append(w);
     }
     const int step = root.value("default_step_ms").toInt(1500);
@@ -559,10 +792,20 @@ void TeachWidget::onReplayTick()
                              .arg(waypoints_.size()));
             return;
         }
-        // Recompute step duration for the new step
-        replay_effective_step_ms_ = estimateStepMs(
-            replay_prev_joints_, waypoints_[replay_idx_].joints,
-            replay_speed_pct_, replay_step_dur_ms_);
+        // Recompute step duration for the new step. A pair of continuously
+        // captured points already knows how long the operator took to move
+        // between them, and that is the correct answer — estimateStepMs
+        // enforces the operator's minimum step time (1500 ms by default),
+        // which would turn a 50 ms capture interval into a 30x slowdown.
+        const Waypoint &prev_wp = waypoints_[replay_idx_ - 1];
+        const Waypoint &next_wp = waypoints_[replay_idx_];
+        if (prev_wp.t_ms >= 0 && next_wp.t_ms > prev_wp.t_ms) {
+            replay_effective_step_ms_ = next_wp.t_ms - prev_wp.t_ms;
+        } else {
+            replay_effective_step_ms_ = estimateStepMs(
+                replay_prev_joints_, next_wp.joints,
+                replay_speed_pct_, replay_step_dur_ms_);
+        }
         replay_start_ms_ = now;
         appendLog(QStringLiteral("→ 第 %1 点预计耗时 %2ms")
                       .arg(replay_idx_ + 1).arg(replay_effective_step_ms_));

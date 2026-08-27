@@ -23,6 +23,7 @@ QString TaskStep::typeLabel(StepType t)
         case StepType::FIX_POINT:       return QStringLiteral("定点跟踪");
         case StepType::DOOR:            return QStringLiteral("舱门");
         case StepType::HELIPAD:         return QStringLiteral("停机坪升降");
+        case StepType::ARM_TRAJECTORY:  return QStringLiteral("机械臂轨迹");
     }
     return QStringLiteral("?");
 }
@@ -110,6 +111,15 @@ QString TaskStep::summary() const
             return QStringLiteral("停机坪 %1  → 等限位 (最长 %2s)")
                 .arg(a == "down" ? QStringLiteral("下降") : QStringLiteral("上升"))
                 .arg(params.value("max_ms", 30000).toInt() / 1000.0, 0, 'f', 1);
+        }
+        case StepType::ARM_TRAJECTORY: {
+            const QVariantList t = params.value("t_ms").toList();
+            if (t.isEmpty()) return QStringLiteral("(空轨迹 — 未录制)");
+            return QStringLiteral("%1 点 / %2s  @%3Hz  速度 %4%")
+                .arg(t.size())
+                .arg(t.last().toInt() / 1000.0, 0, 'f', 1)
+                .arg(params.value("sample_hz", 20).toInt())
+                .arg(int(params.value("speed_ratio", 0.3).toDouble() * 100));
         }
     }
     return {};

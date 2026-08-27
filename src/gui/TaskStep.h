@@ -25,6 +25,7 @@ enum class StepType {
                             // (定点跟踪 — arm goes to point, stays there)
     DOOR            = 9,    // 舱门 开/关/停 (proc_door, RS485 relay)
     HELIPAD         = 10,   // 停机坪升降 上升/下降/停 (same board)
+    ARM_TRAJECTORY  = 11,   // 机械臂连续轨迹 (拖动示教录制的一整段)
 };
 
 struct TaskStep {
@@ -43,6 +44,20 @@ struct TaskStep {
 //
 // MOVE_JOINTS      { joints: [j1..j6], speed_ratio: 0.0-1.0 }
 //                  (joint angles in degrees; speed_ratio default 1.0)
+// ARM_TRAJECTORY   { t_ms: [int...],          N samples, ms from capture start
+//                    joints_flat: [float...], 6*N degrees, J1..J6 per sample
+//                    sample_hz: int, speed_ratio: 0.0-1.0 }
+//                  One whole drag-teach session stored as ONE step, not N
+//                  MOVE_JOINTS rows — a 20 s capture at 20 Hz is ~400
+//                  samples, and 400 rows would bury the rest of the stage.
+//
+//                  Stored as two flat arrays of primitives rather than an
+//                  array of {t, joints} objects: QVariantMap→QJsonObject
+//                  handles arrays of primitives directly, and the flat form
+//                  is several times smaller on disk for the same data.
+//
+//                  Playback re-sends each sample at its recorded t_ms, so
+//                  the trajectory runs at the speed it was taught.
 // MOVE_CARTESIAN   { x_mm, y_mm, z_mm, rx_deg, ry_deg, rz_deg,
 //                    mode: "P" | "L"  }
 // GRIPPER          { angle_mm: 0..70, force_pct: 0..100 }

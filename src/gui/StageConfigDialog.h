@@ -15,6 +15,7 @@ class QLabel;
 class QDoubleSpinBox;
 class QSpinBox;
 class QCheckBox;
+class QTimer;
 
 // Modal editor for one stage's TaskStep script. Opened when the operator
 // clicks the ⚙ gear on a TaskFlowWidget card.
@@ -58,6 +59,8 @@ private slots:
     void onRecordCurrentJoints();
     void onParamChanged();       // any editor field → write back into steps_[cur_row]
     void onExecuteCurrentStep(); // 用当前编辑器参数立刻在真机上执行选中步骤
+    void onTrajRecordToggled(bool on);   // 连续轨迹录制 开/关
+    void onTrajRecordTick();             // 轮询 teach_status + 采样
 
 private:
     void buildUi();
@@ -81,6 +84,31 @@ private:
     QPushButton *btn_dn_    = nullptr;
     QPushButton *btn_record_= nullptr;
     QPushButton *btn_execute_ = nullptr;   // 底部 ▶ 执行 — 立刻跑选中步骤
+
+    // ── ARM_TRAJECTORY 连续轨迹录制 ────────────────────────────────────
+    // Capture is driven by the firmware's teach_status (1 = the operator is
+    // dragging), not by a start/stop button, so the recorded span is exactly
+    // the span the arm was actually being taught.
+    void appendTrajSample(const QVector<float> &j);
+    void commitTrajectory();
+
+    QSpinBox       *tj_rate_       = nullptr;   // Hz
+    QDoubleSpinBox *tj_mindeg_     = nullptr;   // deg, still-sample threshold
+    QSpinBox       *tj_speed_      = nullptr;   // replay speed %
+    QSpinBox       *tj_smooth_     = nullptr;   // moving-average window, samples
+    QCheckBox      *tj_smooth_on_  = nullptr;   // off = store raw points verbatim
+    QLabel         *tj_state_      = nullptr;
+    QPushButton    *btn_tj_record_ = nullptr;
+    QPushButton    *btn_tj_clear_  = nullptr;
+    QPushButton    *btn_tj_enable_ = nullptr;   // 使能/恢复 — same handshake as PiperWidget
+    QTimer         *tj_timer_      = nullptr;
+    bool            tj_capturing_  = false;
+    bool            tj_inflight_   = false;
+    qint64          tj_t0_         = 0;
+    int             tj_skipped_    = 0;
+    QVector<int>    tj_t_ms_;
+    QVector<double> tj_flat_;
+    QVector<float>  tj_last_joints_;
 
     // right side: stacked editors per type, indexed by int(StepType)
     QStackedWidget *editor_stack_ = nullptr;
