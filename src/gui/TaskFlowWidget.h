@@ -102,6 +102,12 @@ public:
     void setClickEnabled(bool enabled);
     bool isClickEnabled() const { return click_enabled_; }
 
+    // 默认 false: ⚙ 配置按钮锁定 — 画成挂锁, 点击只发 configLocked().
+    // Tab4 在操作员通过 AuthDialog 登录后设成 true. Locked is the state the
+    // app STARTS in; nothing here persists it across runs.
+    void setConfigUnlocked(bool unlocked);
+    bool isConfigUnlocked() const { return config_unlocked_; }
+
     QSize sizeHint() const override { return {1100, 420}; }
 
 signals:
@@ -113,7 +119,15 @@ signals:
     // Fires when the operator clicks the small ⚙ gear icon in a stage
     // card's top-right corner. stage_id matches TaskStage::id. Tab4
     // catches this to open StageConfigDialog for that stage.
+    // Only emitted while config is unlocked — see configLocked().
     void stageConfigClicked(QString stage_id);
+
+    // Fires instead of stageConfigClicked() when the gear is clicked while
+    // locked. Tab4 turns this into a "已锁定" notice — a dead button that
+    // gives no feedback at all reads as a bug, so the click still says
+    // something. It says only that the button is locked: the unlock chord
+    // is never surfaced anywhere in the UI or the log.
+    void configLocked();
 
 protected:
     void paintEvent(QPaintEvent *event) override;
@@ -151,6 +165,7 @@ private:
     QString  selected_state_;      // (legacy, 兼容; 当前等于 selected_stage_)
     QString  selected_stage_;      // 单步模式选中的整个卡片 stage_id, 空 = 无
     bool     click_enabled_ = false;
+    bool     config_unlocked_ = false;   // ⚙ gated behind AuthDialog
 
     QVector<StageGeom> geom_;      // index aligned with stages()
     QRectF             block1_rect_;   // 取电池 frame

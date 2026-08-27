@@ -684,42 +684,66 @@ void TaskFlowWidget::paintEvent(QPaintEvent *) {
         // ⚙ gear button (top-right of card) — draws inside g.gear_rect.
         // Hover state brightens the icon; the hit-test logic in
         // mousePressEvent fires stageConfigClicked() when clicked.
+        //
+        // While config is locked a PADLOCK is drawn in the gear's place
+        // rather than a greyed-out gear. A dimmed gear reads as "temporarily
+        // busy" and invites clicking; a padlock says why nothing happens.
         {
             const QRectF &gr = g.gear_rect;
             const bool hov = (hover_gear_ == i);
-            QColor gear_fg = hov ? QColor(0xff, 0xc7, 0x4d)        // hover: orange
-                                  : QColor(0xa8, 0xb5, 0xd0);       // idle: muted blue-grey
             p.setRenderHint(QPainter::Antialiasing, true);
-            // Subtle background circle when hovered, makes the hit area visible.
-            if (hov) {
-                QColor bg(0xff, 0xc7, 0x4d, 50);
+
+            if (!config_unlocked_) {
+                const QColor lock_fg = hov ? QColor(0xff, 0xc7, 0x4d)   // hover: orange
+                                           : QColor(0x6a, 0x72, 0x88);  // idle: dim
+                const QPointF c = gr.center();
+                const qreal w = gr.width();
+                // Shackle: half-ring above the body.
+                const qreal sh_r = w * 0.20;
+                QRectF shackle(c.x() - sh_r, c.y() - w * 0.36, sh_r * 2, sh_r * 2);
+                p.setPen(QPen(lock_fg, 1.5));
+                p.setBrush(Qt::NoBrush);
+                p.drawArc(shackle, 0 * 16, 180 * 16);
+                // Body.
+                QRectF body(c.x() - w * 0.28, c.y() - w * 0.10,
+                            w * 0.56, w * 0.42);
                 p.setPen(Qt::NoPen);
-                p.setBrush(bg);
-                p.drawEllipse(gr);
+                p.setBrush(lock_fg);
+                p.drawRoundedRect(body, 2.0, 2.0);
+            } else {
+                QColor gear_fg = hov ? QColor(0xff, 0xc7, 0x4d)    // hover: orange
+                                     : QColor(0xa8, 0xb5, 0xd0);   // idle: muted blue-grey
+                // Subtle background circle when hovered, makes the hit area visible.
+                if (hov) {
+                    QColor bg(0xff, 0xc7, 0x4d, 50);
+                    p.setPen(Qt::NoPen);
+                    p.setBrush(bg);
+                    p.drawEllipse(gr);
+                }
+                // 12-tooth gear glyph drawn as a small ring + 8 short radial
+                // teeth + center hole. Simple but recognisable at 18 px.
+                const QPointF center = gr.center();
+                const qreal outer = gr.width() * 0.45;
+                const qreal inner = gr.width() * 0.32;
+                const qreal hole  = gr.width() * 0.13;
+                p.setPen(QPen(gear_fg, 1.5));
+                p.setBrush(Qt::NoBrush);
+                // ring
+                p.drawEllipse(center, inner, inner);
+                // 8 teeth
+                for (int t = 0; t < 8; ++t) {
+                    const double ang = t * (M_PI / 4.0);
+                    const QPointF a(center.x() + inner * std::cos(ang),
+                                    center.y() + inner * std::sin(ang));
+                    const QPointF b(center.x() + outer * std::cos(ang),
+                                    center.y() + outer * std::sin(ang));
+                    p.drawLine(a, b);
+                }
+                // center hole
+                p.setBrush(gear_fg);
+                p.setPen(Qt::NoPen);
+                p.drawEllipse(center, hole, hole);
             }
-            // 12-tooth gear glyph drawn as a small ring + 8 short radial
-            // teeth + center hole. Simple but recognisable at 18 px.
-            const QPointF center = gr.center();
-            const qreal outer = gr.width() * 0.45;
-            const qreal inner = gr.width() * 0.32;
-            const qreal hole  = gr.width() * 0.13;
-            p.setPen(QPen(gear_fg, 1.5));
-            p.setBrush(Qt::NoBrush);
-            // ring
-            p.drawEllipse(center, inner, inner);
-            // 8 teeth
-            for (int t = 0; t < 8; ++t) {
-                const double ang = t * (M_PI / 4.0);
-                const QPointF a(center.x() + inner * std::cos(ang),
-                                center.y() + inner * std::sin(ang));
-                const QPointF b(center.x() + outer * std::cos(ang),
-                                center.y() + outer * std::sin(ang));
-                p.drawLine(a, b);
-            }
-            // center hole
-            p.setBrush(gear_fg);
-            p.setPen(Qt::NoPen);
-            p.drawEllipse(center, hole, hole);
         }
 
         // Signal rows
@@ -779,9 +803,14 @@ void TaskFlowWidget::mousePressEvent(QMouseEvent *event) {
     // ⚙ gear: hit-test FIRST so it works regardless of click_enabled_.
     // The gear lives in the card's title bar, top-right corner; tapping
     // it opens StageConfigDialog via the stageConfigClicked() signal.
+    //
+    // Locked: swallow the click here (still `return`, so it can never fall
+    // through to card selection) and emit configLocked() so Tab4 can tell
+    // the operator how to unlock.
     for (int i = 0; i < geom_.size(); ++i) {
         if (geom_[i].gear_rect.contains(p)) {
-            emit stageConfigClicked(stages()[i].id);
+            if (config_unlocked_) emit stageConfigClicked(stages()[i].id);
+            else                  emit configLocked();
             return;
         }
     }
@@ -815,6 +844,14 @@ void TaskFlowWidget::setClickEnabled(bool enabled) {
     setCursor(enabled ? Qt::PointingHandCursor : Qt::ArrowCursor);
 }
 
+void TaskFlowWidget::setConfigUnlocked(bool unlocked) {
+    if (config_unlocked_ == unlocked) return;
+    config_unlocked_ = unlocked;
+    // The glyph in every card's title bar flips between padlock and gear,
+    // so the whole widget needs a repaint, not just the hovered card.
+    update();
+}
+
 void TaskFlowWidget::mouseMoveEvent(QMouseEvent *event) {
     const QPointF p = event->position();
     int new_card = -1, new_sig = -1, new_gear = -1;
@@ -823,7 +860,12 @@ void TaskFlowWidget::mouseMoveEvent(QMouseEvent *event) {
     for (int i = 0; i < geom_.size(); ++i) {
         if (geom_[i].gear_rect.contains(p)) {
             new_gear = i;
-            tip = QStringLiteral("配置 stage: %1").arg(stages()[i].title);
+            // Locked tooltip says WHAT, never HOW. The unlock chord is
+            // deliberately undiscoverable from the UI — an operator who can
+            // read the key combination off a tooltip is not gated at all.
+            tip = config_unlocked_
+                      ? QStringLiteral("配置 stage: %1").arg(stages()[i].title)
+                      : QStringLiteral("配置已锁定");
             break;
         }
     }
@@ -846,8 +888,11 @@ void TaskFlowWidget::mouseMoveEvent(QMouseEvent *event) {
         hover_card_ = new_card;
         hover_sig_  = new_sig;
         hover_gear_ = new_gear;
-        // change cursor when hovering a gear so it's obviously clickable
-        setCursor((new_gear >= 0 || click_enabled_) ? Qt::PointingHandCursor : Qt::ArrowCursor);
+        // change cursor when hovering a gear so it's obviously clickable —
+        // and to a "no entry" cursor when the gear is there but locked.
+        if (new_gear >= 0 && !config_unlocked_)      setCursor(Qt::ForbiddenCursor);
+        else if (new_gear >= 0 || click_enabled_)    setCursor(Qt::PointingHandCursor);
+        else                                        setCursor(Qt::ArrowCursor);
         update();
     }
     if (!tip.isEmpty()) QToolTip::showText(event->globalPosition().toPoint(), tip, this);

@@ -81,6 +81,13 @@ private slots:
     void onFlowStationClicked(QString state_id);
     void onStageConfigClicked(QString stage_id);   // ⚙ on TaskFlowWidget card
 
+    // ── 配置权限 ─────────────────────────────────────────────────────────
+    // Ctrl+L+G → AuthDialog (admin/admin) → the ⚙ buttons become live.
+    // Pressing the chord again while unlocked re-locks, so the operator can
+    // hand the station back without restarting the app.
+    void onConfigLockShortcut();
+    void onConfigLockedClick();      // gear clicked while locked → hint
+
     // 单步调试模式: 流程图上选一张卡片(stage), "执行选中" 把该 stage 下
     // 所有 sub-state 依次通过 arm.move_joints 发到真机, 1.5 秒每一步.
     void onFlowStepExecute();
@@ -89,6 +96,10 @@ private slots:
 
 private:
     void buildUi();
+    // Applies config_unlocked_ to the flow chart + the header indicator.
+    // Single place that touches the lock's visible state, so the two can
+    // never disagree.
+    void applyConfigLockState();
     // Walks one TaskStep from the recorded script, dispatching to the
     // right RPC by step type and setting step_advance_timer_'s interval
     // to match the step's expected duration.
@@ -200,6 +211,11 @@ private:
     QPushButton    *btn_flow_pickup_  = nullptr;   // 取电: phase1 (stage 1..5)
     QPushButton    *btn_flow_swap_    = nullptr;   // 换电: phase2 (stage 6..9)
     QLabel         *flow_status_label_= nullptr;
+    QLabel         *config_lock_label_= nullptr;   // 🔒 已锁定 / 🔓 admin
+
+    // ⚙ 配置权限. Starts LOCKED on every launch and is never persisted —
+    // an app restart is meant to put the station back into operator mode.
+    bool            config_unlocked_  = false;
 
     // Flow simulator (sim mode) — walks a precomputed playlist.
     //   - If a stage has a configured TaskStep script (stage_scripts_),

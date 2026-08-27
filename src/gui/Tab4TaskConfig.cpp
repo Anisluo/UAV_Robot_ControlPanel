@@ -5,11 +5,14 @@
 #include "TaskFlowWidget.h"
 #include "TaskStep.h"
 #include "StageConfigDialog.h"
+#include "AuthDialog.h"
 #include "core/RpcClient.h"
 #include "core/Protocol.h"
 
 #include <QRadioButton>
 #include <QButtonGroup>
+#include <QShortcut>
+#include <QKeySequence>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QMessageBox>
@@ -429,6 +432,13 @@ QWidget* Tab4TaskConfig::buildTaskPanel()
     bar->addWidget(btn_estop_);
     bar->addStretch(1);
 
+    // ⚙ 配置锁状态指示. Deliberately NOT a button — the only way in is the
+    // Ctrl+L+G chord, so a clickable control here would advertise the gate
+    // to exactly the operators it is meant to keep out. It is a readout.
+    config_lock_label_ = new QLabel(grp);
+    config_lock_label_->setStyleSheet("font-family: Consolas; padding-right: 8px;");
+    bar->addWidget(config_lock_label_);
+
     flow_status_label_ = new QLabel("就绪 · 模式: 模拟", grp);
     flow_status_label_->setStyleSheet("font-family: Consolas; color: #c0d0f0;");
     bar->addWidget(flow_status_label_);
@@ -466,6 +476,26 @@ QWidget* Tab4TaskConfig::buildTaskPanel()
             this,            &Tab4TaskConfig::onFlowStationClicked);
     connect(flow_widget_,    &TaskFlowWidget::stageConfigClicked,
             this,            &Tab4TaskConfig::onStageConfigClicked);
+    connect(flow_widget_,    &TaskFlowWidget::configLocked,
+            this,            &Tab4TaskConfig::onConfigLockedClick);
+
+    // ── Ctrl+L+G: 解锁/锁定 步骤配置 ──────────────────────────────────────
+    // Qt key sequences are a SEQUENCE of keystrokes, not a set of keys held
+    // together, so "Ctrl+L+G" cannot be expressed as one shortcut. Holding
+    // Ctrl and rolling L then G emits Ctrl+L followed by Ctrl+G — that is
+    // the primary binding. The second binding covers the operator who lets
+    // Ctrl go after L, which produces a bare G. Both land on the same slot.
+    //
+    // WindowShortcut (not WidgetWithChildrenShortcut) because the operator
+    // may well have just clicked the tab, leaving focus on the tab bar
+    // rather than inside this page; the handler checks isVisible() instead,
+    // which is exactly "任务配置 page is the one on screen".
+    for (const char *seq : {"Ctrl+L, Ctrl+G", "Ctrl+L, G"}) {
+        auto *sc = new QShortcut(QKeySequence(QLatin1String(seq)), this);
+        sc->setContext(Qt::WindowShortcut);
+        connect(sc, &QShortcut::activated, this, &Tab4TaskConfig::onConfigLockShortcut);
+    }
+    applyConfigLockState();
 
     // Load any previously-saved per-stage TaskStep scripts from the
     // operator's user-config directory. This is the persistent script
@@ -2273,6 +2303,15 @@ void Tab4TaskConfig::onFlowStepSkip()
 // ════════════════════════════════════════════════════════════════════════
 void Tab4TaskConfig::onStageConfigClicked(QString stage_id)
 {
+    // Second gate. TaskFlowWidget already refuses to emit this signal while
+    // locked, so reaching here means a NEW caller was wired up (a menu item,
+    // a keyboard path) that forgot the check. Refuse rather than trust the
+    // sender — this is the one function that opens the editor.
+    if (!config_unlocked_) {
+        onConfigLockedClick();
+        return;
+    }
+
     if (flow_running_) {
         QMessageBox::warning(this, QStringLiteral("配置中"),
                               QStringLiteral("流程运行中, 请先停止再配置 stage"));
@@ -2311,4 +2350,72 @@ void Tab4TaskConfig::onStageConfigClicked(QString stage_id)
     // 取消 / X 都走 reject, exec() 返回 Rejected, 这里也无需再做什么 —
     // 因为 saveStage 每次都会同步写盘, 所有 "保存过的" 都在 JSON 里了.
     dlg.exec();
+}
+
+
+// ════════════════════════════════════════════════════════════════════════
+// ⚙ 配置权限 — Ctrl+L+G → admin/admin
+//
+// The ⚙ per-stage config buttons edit the scripts that drive the real arm,
+// rails and gripper. On a running cell they sit under the operator's mouse
+// all day; this makes opening the editor a deliberate, credentialed act.
+// Locked is the state every launch starts in, and nothing about the unlock
+// is written to disk.
+// ════════════════════════════════════════════════════════════════════════
+
+void Tab4TaskConfig::applyConfigLockState()
+{
+    if (flow_widget_) flow_widget_->setConfigUnlocked(config_unlocked_);
+    if (!config_lock_label_) return;
+
+    // Neither the label nor its tooltip ever names the unlock chord — see
+    // onConfigLockShortcut(). The readout tells the operator the state so a
+    // dead ⚙ is not mistaken for a bug; it is not a hint on how to get in.
+    if (config_unlocked_) {
+        config_lock_label_->setText(QStringLiteral("🔓 配置已解锁 (admin)"));
+        config_lock_label_->setStyleSheet(
+            "font-family: Consolas; color: #90ffc0; padding-right: 8px;");
+        config_lock_label_->setToolTip(QStringLiteral("⚙ 步骤配置可用"));
+    } else {
+        config_lock_label_->setText(QStringLiteral("🔒 配置已锁定"));
+        config_lock_label_->setStyleSheet(
+            "font-family: Consolas; color: #8a93a8; padding-right: 8px;");
+        config_lock_label_->setToolTip(QStringLiteral("⚙ 步骤配置不可用"));
+    }
+}
+
+void Tab4TaskConfig::onConfigLockShortcut()
+{
+    // Window-wide shortcut — only act when THIS tab is the one on screen.
+    if (!isVisible()) return;
+
+    if (config_unlocked_) {
+        // Re-lock. No credential needed to give a permission back.
+        config_unlocked_ = false;
+        applyConfigLockState();
+        appendLog("info", QStringLiteral("[auth] 步骤配置已重新锁定"));
+        return;
+    }
+
+    if (!AuthDialog::authenticate(this)) {
+        appendLog("warn", QStringLiteral("[auth] 登录取消/失败, 配置保持锁定"));
+        return;
+    }
+    config_unlocked_ = true;
+    applyConfigLockState();
+    appendLog("info", QStringLiteral("[auth] admin 已登录 — ⚙ 步骤配置解锁"));
+}
+
+void Tab4TaskConfig::onConfigLockedClick()
+{
+    // Deliberately does NOT pop the login dialog. If clicking the padlock
+    // opened it, the chord would be decoration and every operator would find
+    // the way in by accident — the chord IS the gate.
+    //
+    // And it never prints the chord. The log is the first place a curious
+    // operator looks, and one line naming the key combination would undo
+    // the whole gate. Say the button is locked; say nothing about the way in.
+    appendLog("warn", QStringLiteral("[auth] 步骤配置已锁定"));
+    if (flow_status_label_)
+        flow_status_label_->setText(QStringLiteral("🔒 配置已锁定"));
 }
